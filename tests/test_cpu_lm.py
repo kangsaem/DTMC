@@ -60,6 +60,18 @@ for k, think in (("0.6B", True), ("off", False), ("1.7B", True)):
         assert "ACESTEP_INIT_LLM" not in job.senv
 print("mock ok")
 
+# 보컬 시험(v0.1.16): 4곡 · 같은 씨앗 · 가사 칸/지시문만 다름
+plan = jobs.Plan(analyze_on=False, out_dir=out, cpu_lm="1.7B")
+job = jobs.MakeJob(engine.Engine(), [], plan, vocal=True)
+res = run_job(job)
+assert res.get("ok") and len(job.outputs) == 4, res
+rs = json.loads(urllib.request.urlopen(url + "/_requests").read())[-4:]
+assert len({r["seed"] for r in rs}) == 1 and all(r["thinking"] for r in rs) and all(r["audio_duration"] == 30 for r in rs)
+assert [r["lyrics"] == "[Instrumental]" for r in rs] == [False, True, False, True]
+assert rs[0]["prompt"] == rs[1]["prompt"] == prompt.style_caption("anime") and rs[2]["prompt"] == prompt.ANIME_ALT
+assert "애니_Instrumental" in job.outputs[1].name, job.outputs[1].name
+print("vocal ok")
+
 # 2. 실제 엔진처럼(가짜 엔진 주소 없이): 모델 준비 · 서버가 실제로 읽었는지 확인
 del os.environ["DTMC_ENGINE_URL"]
 ck = engine.checkpoints()

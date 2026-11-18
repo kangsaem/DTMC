@@ -131,6 +131,23 @@ def style_request(style, *, seconds, bpm=None, key_scale="", profile=None, seed=
     return req
 
 
+# ------------------------------------------------------------ 보컬 시험(v0.1.16)
+# 노트북 실기(11/18): 애니 오프닝 + 작곡 담당 1.7B → 노래 같은 웅얼거림 · 작곡 담당 끄면 없음.
+# 작곡 담당은 지시문 + 가사 칸을 함께 읽음(llm_inference.build_formatted_prompt) → 가사 칸 · 지시문을 바꿔 비교.
+VOCAL_SECONDS = 30
+ANIME_ALT = ("Anime opening style instrumental rock, purely instrumental band track. Fast-paced energetic rock with "
+             "powerful electric guitars, driving drums and melodic bass; a bright lead guitar and synth lead carry the "
+             "catchy heroic melody, dramatic orchestral hits. Exciting, uplifting, energetic mood.")
+
+
+def vocal_cases(style: str = "anime") -> list:
+    """(번호, 이름, 지시문, 가사 칸) 4가지: ① 지금 ② 가사 칸 [Instrumental] ③ 지시문 수정 ④ 둘 다."""
+    cap = style_caption(style)
+    alt = ANIME_ALT if style == "anime" else cap
+    return [(1, "지금", cap, STYLE_LYRICS), (2, "Instrumental", cap, "[Instrumental]"),
+            (3, "지시문수정", alt, STYLE_LYRICS), (4, "둘다", alt, "[Instrumental]")]
+
+
 LEN_MIN, LEN_MAX = 10, 600
 
 

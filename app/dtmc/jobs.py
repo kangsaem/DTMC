@@ -142,10 +142,11 @@ class MakeJob(QThread):
     finished_ok = Signal(bool, str)
 
     def __init__(self, eng: EG.Engine, sources: list[Source], plan: Plan, test: bool = False,
-                 compare: bool = False, fit_len: bool = False, parent=None):
+                 compare: bool = False, fit_len: bool = False, vocal: bool = False, parent=None):
         """test = 악기 시험 · compare = 비교 시험(첫 원곡 기준 60초, 같은 씨앗으로 모델만 바꿔 가며)."""
         super().__init__(parent)
         self.eng, self.sources, self.plan, self.test, self.compare = eng, list(sources), plan, test, compare
+        self.vocal = vocal                         # 보컬 시험(v0.1.16): 애니 오프닝 30초 × 가사 칸 · 지시문 4가지
         self.fit_len = fit_len                     # 원곡 길이 맞추기 시험(편집만 / 이음매 다시 그리기 / 커버 2가지)
         self.cancel = False
         self.failed: list[str] = []                # 비교 시험에서 건너뛴 곡(이유)
@@ -157,7 +158,7 @@ class MakeJob(QThread):
         return self.cancel
 
     def steps(self) -> list[str]:
-        if self.test or self.compare or self.fit_len:
+        if self.test or self.compare or self.fit_len or self.vocal:
             return ["engine", "generate"]
         return ["engine", "analyze", "generate"] if self.plan.analyze_on else ["engine", "generate"]
 
@@ -301,6 +302,8 @@ class MakeJob(QThread):
             return self._run_compare(out_dir)
         if self.fit_len:
             return self._run_fit(out_dir)
+        if self.vocal:
+            return self._run_vocal(out_dir)
         srcs = [s for s in self.sources if s.checked and not s.error] or [None]      # 원곡은 선택 사항(없으면 스타일만으로)
         if p.analyze_on:
             real = [s for s in srcs if s is not None]
@@ -484,6 +487,64 @@ class MakeJob(QThread):
                 self.step.emit("generate", (i + 1) / n, f"{head}{ko} 완료")
             if failed and not self.outputs:
                 raise EG.EngineError("스타일 샘플이 모두 실패했습니다: " + " / ".join(failed)[:300])
+            self.failed = failed
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _run_vocal(self, out_dir: Path):
+        """보컬 시험: 애니 오프닝 30초 · 같은 씨앗 · 작곡 담당은 고른 설정 그대로. 가사 칸 · 지시문만 바꿔 4곡.
+        원곡이 있으면 조성 · 템포(스타일 범위 안일 때만)를 가져옴. 한 곡이 실패해도 나머지는 계속."""
+        p = self.plan
+        srcs = [s for s in self.sources if s.checked and not s.error]
+        s = srcs[0] if srcs else None
+        if s is not None and s.analysis is None and p.analyze_on:
+            s.analysis = analyze.analyze_file(s.path)
+            s.duration = s.analysis.duration
+        a, bpm, key, forced = self._meta(s)
+        sec = float(prompt.VOCAL_SECONDS)
+        seed = random.randint(1, 2 ** 31 - 1)
+        st = prompt.STYLE_BY["anime"]
+        cases = prompt.vocal_cases("anime")
+        n = len(cases)
+        work = EG.tmp_dir() / time.strftime("voc_%Y%m%d_%H%M%S")
+        work.mkdir(parents=True, exist_ok=True)
+        failed = []
+        try:
+            for i, (no, name, cap, lyr) in enumerate(cases):
+                if self.cancel:
+                    raise EG.Cancelled("취소했습니다")
+                head = f"{i + 1}/{n} "
+                req = prompt.style_request(st, seconds=sec, bpm=bpm, key_scale=key, profile=self.prof, seed=seed,
+                                           model=self.ps["model"], caption=cap, force_bpm=forced, **self.ps["opt"])
+                req["lyrics"] = lyr
+                t0 = time.monotonic()
+
+                def prog(f, text, i=i, name=name, t0=t0):
+                    self.step.emit("generate", (i + min(0.95, max(0.0, f))) / n,
+                                   f"{i + 1}/{n} {name} · {int(time.monotonic() - t0)}초")
+                self.step.emit("generate", i / n, f"{head}{name}")
+                try:
+                    wavs = self.eng.generate(req, work / f"{no}", prog, self.stopped)
+                except EG.Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001 — 이 곡만 건너뜀
+                    L.warning("보컬 시험 %s 실패: %s", name, e)
+                    failed.append(f"{name}: {e}")
+                    self.step.emit("generate", (i + 1) / n, f"{head}{name} 실패 — 건너뜀")
+                    if not self.eng.running() and not EG.external_url():
+                        self.eng.start(lambda t: None, self.stopped, extra_env=self.senv)
+                    continue
+                remember_speed(sec, time.monotonic() - t0, self.lm_key)
+                stem = prompt.style_stem(p.title, s.name if s is not None else "보컬시험", no, f"애니_{name}", sec)
+                out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
+                self.outputs.append(out)
+                self.item.emit({"path": str(out), "source": s.name if s is not None else "",
+                                "src_path": s.path if s is not None else "", "label": f"{no}. 애니 · {name}",
+                                "instr": "", "seed": seed, "n": 1, "of": 1, "seconds": sec})
+                write_history(self._record(req, s, [str(out)], [], sec, a, kind="vocal_test", style=st[0], case=name))
+                self.step.emit("generate", (i + 1) / n, f"{head}{name} 완료")
+            if failed and not self.outputs:
+                raise EG.EngineError("보컬 시험이 모두 실패했습니다: " + " / ".join(failed)[:300])
             self.failed = failed
         finally:
             shutil.rmtree(work, ignore_errors=True)

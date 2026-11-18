@@ -1,5 +1,6 @@
 """시작 창(DTME 시작 창 틀 그대로): 제목 표시줄·테두리 없는 400×560, 위 = 정사각형 영상(assets/start.mp4, v0.1.15:
-소리 없이 한 번 재생 → 마지막 장면에서 멈춤 · 재생 전 = start_poster.jpg · 영상을 못 쓰면 start.png)
+처음엔 첫 장면(start_poster.jpg) → [AUTO] 를 누르면 소리 없이 재생 → 끝나면 작업 창(v0.1.16).
+재생 중 [AUTO] = [건너뛰기] · 그림 클릭 = 건너뛰기 · 원곡을 끌어다 놓으면 바로. 영상을 못 쓰면 start.png · 바로 작업 창)
 + 왼쪽 위 'DTMC'·버전 + 오른쪽 위 ✕(종료) + 오른쪽 아래 세로 글자, 아래(#262626) = [AUTO] 160×48. 빈 곳을 끌어 옮김.
 [AUTO] = 빈 작업 창 · 원곡을 끌어다 놓기 = 그 파일이 들어간 작업 창. 작업 창 [취소] = 이 창으로."""
 from __future__ import annotations
@@ -51,6 +52,8 @@ class StartWindow(QWidget):
         self.setAcceptDrops(True)
         self.setFixedSize(W, H)
         self._drag = None
+        self._press = None
+        self._pending = None                  # 영상이 끝나면 열 작업(파일 목록)
         self._style(False)
         self.img = QLabel(self)
         self.img.setFixedSize(IMG, IMG)
@@ -110,7 +113,7 @@ class StartWindow(QWidget):
         f.setPointSizeF(f.pointSizeF() * 1.3)
         f.setBold(True)
         self.b_auto.setFont(f)
-        self.b_auto.clicked.connect(lambda: self.open_work([]))
+        self.b_auto.clicked.connect(self._auto)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
@@ -130,22 +133,53 @@ class StartWindow(QWidget):
         return pm
 
     def _play(self, video) -> bool:
-        """영상을 소리 없이 한 번 재생(장면마다 그림 칸에 그림 → 겹친 제목·그라데이션·✕ 가 그대로 위에 보임).
-        끝나면 마지막 장면이 그대로 남음. 못 쓰면 False(→ 그림)."""
+        """영상 준비(재생은 [AUTO] 때). 장면마다 그림 칸에 그림 → 겹친 제목·그라데이션·✕ 가 그대로 위에 보임.
+        못 쓰면 False(→ 그림)."""
         try:
             from PySide6.QtMultimedia import QMediaPlayer, QVideoSink
             self.player = QMediaPlayer(self)                 # 소리 출력(QAudioOutput)을 안 붙임 = 소리 없음
             self.sink = QVideoSink(self)
             self.player.setVideoSink(self.sink)
             self.sink.videoFrameChanged.connect(self._frame)
-            self.player.errorOccurred.connect(lambda _e, msg="": log.log.warning("시작 영상 재생 실패: %s", msg))
+            self.player.errorOccurred.connect(self._video_error)
+            self.player.mediaStatusChanged.connect(self._status)
             self.player.setSource(QUrl.fromLocalFile(str(video)))
-            self.player.play()
             return True
         except Exception as e:  # noqa: BLE001
             log.log.warning("시작 영상 못 씀(그림으로): %s", e)
             self.player = self.sink = None
             return False
+
+    def _auto(self):
+        """[AUTO]: 영상을 재생하고 끝나면 작업 창. 재생 중이면 [건너뛰기]."""
+        if self._pending is not None:
+            return self._go()
+        if self.player is None:
+            return self.open_work([])
+        self._pending = []
+        self.b_auto.setText("건너뛰기")
+        self.player.setPosition(0)
+        self.player.play()
+
+    def _status(self, st):
+        from PySide6.QtMultimedia import QMediaPlayer
+        if st == QMediaPlayer.EndOfMedia and self._pending is not None:
+            self._go()
+
+    def _video_error(self, _e, msg=""):
+        log.log.warning("시작 영상 재생 실패: %s", msg)
+        if self._pending is not None:
+            self._go()
+
+    def _go(self):
+        """영상 재생을 끝내고 작업 창으로(한 번만)."""
+        files, self._pending = self._pending, None
+        if files is None:
+            return
+        if self.player is not None:
+            self.player.pause()
+        self.b_auto.setText("AUTO")
+        self.open_work(files)
 
     def _frame(self, f):
         try:
@@ -162,6 +196,7 @@ class StartWindow(QWidget):
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._press = e.globalPosition().toPoint()
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
@@ -171,6 +206,10 @@ class StartWindow(QWidget):
 
     def mouseReleaseEvent(self, e):
         self._drag = None
+        p0, self._press = self._press, None
+        if (self._pending is not None and p0 is not None and e.position().y() < IMG
+                and (e.globalPosition().toPoint() - p0).manhattanLength() < 5):   # 재생 중 그림 클릭 = 건너뛰기
+            self._go()
         super().mouseReleaseEvent(e)
 
     def center(self):
@@ -188,7 +227,13 @@ class StartWindow(QWidget):
 
     def dropEvent(self, e):
         self._style(False)
-        self.open_work([u.toLocalFile() for u in e.mimeData().urls()])
+        files = [u.toLocalFile() for u in e.mimeData().urls()]
+        if self._pending is not None:                         # 재생 중이면 멈추고 바로
+            self._pending = None
+            if self.player is not None:
+                self.player.pause()
+            self.b_auto.setText("AUTO")
+        self.open_work(files)
 
     def hideEvent(self, e):
         if self.player is not None:                           # 작업 창으로 넘어가면 멈춤(마지막 장면 유지)

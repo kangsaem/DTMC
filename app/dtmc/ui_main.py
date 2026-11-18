@@ -486,7 +486,7 @@ class WorkWindow(DragMove, QWidget):
         self.cand = Seg([(str(i), f"{i}곡") for i in (1, 2, 3, 4)], str(hw.profile().candidates))
         self.cand.changed.connect(lambda _k: self._sync())
         # CPU(노트북) 작곡 담당(v0.1.14): 끔(기본) · 0.6B · 1.7B — GPU 는 늘 켜져 있어 안 보임
-        self.cpu_lm = Seg(prompt.CPU_LM, "off")
+        self.cpu_lm = Seg(prompt.CPU_LM, "1.7B")          # v0.1.16: 노트북 기본 1.7B(실기: 끄면 곡이 덜 좋음 · 1.7B 동작 확인)
         self.cpu_lm.changed.connect(lambda _k: self._sync())
         self.cpu_lm.setToolTip("작곡 담당(멜로디·구성) — 켜면 곡 구성이 나아질 수 있으나 느려짐.\n"
                                "0.6B = 처음 쓸 때 받음 · 1.7B = 메모리가 빠듯해 실패할 수 있음(그러면 끈 채로 만듦)\n"
@@ -500,8 +500,8 @@ class WorkWindow(DragMove, QWidget):
             crow2.addSpacing(16)
             crow2.addWidget(lm_lab)
             crow2.addWidget(self.cpu_lm)
-            self.lm_note = self._hint("")
-            crow2.addWidget(self.lm_note, 1)
+            self.lm_note = None                       # 설명은 말풍선(좁아서 글을 두지 않음)
+            crow2.addStretch(1)
         else:
             self.cpu_lm.hide()
             self.lm_note = None
@@ -530,7 +530,12 @@ class WorkWindow(DragMove, QWidget):
         trow.setSpacing(8)
         trow.addWidget(self.b_cmp)
         trow.addWidget(self.b_fit)
-        trow.addWidget(self._hint("시험용 — 버튼에 마우스를 올리면 설명."), 1)
+        self.b_voc = small_button("보컬 시험", 84, 28,
+                                  f"애니 오프닝 {prompt.VOCAL_SECONDS}초 × 4(같은 씨앗): ① 지금 ② 가사 칸 [Instrumental] "
+                                  "③ 지시문 수정 ④ 둘 다 — 노래 같은 소리가 섞이는지 비교")
+        self.b_voc.clicked.connect(self.start_vocal)
+        trow.addWidget(self.b_voc)
+        trow.addWidget(self._hint("시험용 · 설명 = 마우스"), 1)
         return self._body([labeled("스타일", self.style), labeled("지시문", self.cap), labeled("", crow),
                            labeled("길이", lrow), labeled("후보", crow2), labeled("음색 참고", rrow), trow])
 
@@ -571,7 +576,7 @@ class WorkWindow(DragMove, QWidget):
         self.len_mode.set_value(c.get("length_mode", "src"))
         self.secs.setValue(int(c.get("seconds", 60)))
         self.cand.set_value(str(c.get("candidates", hw.profile().candidates)))
-        self.cpu_lm.set_value(c.get("cpu_lm", "off") if c.get("cpu_lm") in dict(prompt.CPU_LM) else "off")
+        self.cpu_lm.set_value(c.get("cpu_lm") if c.get("cpu_lm") in dict(prompt.CPU_LM) else "1.7B")
         self.fmt.set_value(c.get("fmt", "mp3"))
         self.out_dir = c.get("out_dir", "")
         self.refs = [f for f in (c.get("refs") or []) if f and Path(f).is_file()][: prompt.MAX_REFS]
@@ -658,9 +663,9 @@ class WorkWindow(DragMove, QWidget):
                                             + (f" · 작곡 담당 {p.cpu_lm}" if p.cpu_lm != "off" else "")
                                             + (" · 음색 참고" if self.refs and not (p.src_feel and use_src) else ""))
         if self.lm_note is not None:
-            self.lm_note.setText({"off": "", "0.6B": "느려짐 · 처음 쓸 때 받음",
-                                  "1.7B": "많이 느려짐 · 메모리 부족이면 끈 채로"}.get(p.cpu_lm, ""))
-            self.lm_note.setStyleSheet(f"color:{WARN if p.cpu_lm == '1.7B' else SUB_TXT}; font-size:11px;")
+            self.lm_note.setText({"off": "곡 구성이 단순해질 수 있음", "0.6B": "처음 쓸 때 받음",
+                                  "1.7B": "메모리 부족이면 끈 채로"}.get(p.cpu_lm, ""))
+            self.lm_note.setStyleSheet(f"color:{SUB_TXT}; font-size:11px;")
         self.cap_note.setText("직접 고침 — 스타일을 다시 고르면 지워집니다" if custom else f"자동(스타일: {st[1]})")
         self.cap_note.setStyleSheet(f"color:{WARN if custom else SUB_TXT}; font-size:11px;")
         self.b_reset.setEnabled(custom)
@@ -696,6 +701,7 @@ class WorkWindow(DragMove, QWidget):
         self.b_cancel.setVisible(self.mode != "setup")
         self.b_cmp.setEnabled(self.mode == "setup")
         self.b_fit.setEnabled(self.mode == "setup" and bool(cs))
+        self.b_voc.setEnabled(self.mode == "setup")
         if self.mode == "setup":
             self._save_cfg()
 
@@ -826,6 +832,10 @@ class WorkWindow(DragMove, QWidget):
         if self.mode == "setup":
             self._run(test=False, compare=True)
 
+    def start_vocal(self):
+        if self.mode == "setup":
+            self._run(test=False, vocal=True)
+
     def start_fit(self):
         """원곡 길이 맞추기 시험: 첫 원곡을 '길이' 칸의 값으로."""
         if self.mode != "setup":
@@ -855,7 +865,7 @@ class WorkWindow(DragMove, QWidget):
                              [("cancel", "취소", 72, None), ("ok", "내려받고 시작", 110, "blue")])
         return r == "ok"
 
-    def _run(self, test: bool, compare: bool = False, fit_len: bool = False):
+    def _run(self, test: bool, compare: bool = False, fit_len: bool = False, vocal: bool = False):
         if not self._ensure_engine():
             return
         if not self._confirm_models(compare):
@@ -863,7 +873,8 @@ class WorkWindow(DragMove, QWidget):
         self.player.stop()
         plan = self.plan()
         self._save_cfg()
-        self.job = jobs.MakeJob(self.eng, self.checked(), plan, test=test, compare=compare, fit_len=fit_len, parent=self)
+        self.job = jobs.MakeJob(self.eng, self.checked(), plan, test=test, compare=compare, fit_len=fit_len,
+                                vocal=vocal, parent=self)
         self.job.step.connect(self._on_step)
         self.job.item.connect(self._on_item)
         self.job.finished_ok.connect(self._on_done)
