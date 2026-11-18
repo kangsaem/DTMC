@@ -45,6 +45,7 @@ class Plan:
     fmt: str = "mp3"
     out_dir: str = ""
     title: str = ""                                  # 파일 이름 앞부분(비우면 원곡 이름 첫 단어)
+    quality: str = "std"                             # std = shift3 · hq = XL(큰 그래픽 메모리만) — prompt.preset
     refs: list = field(default_factory=list)         # 음색 참고 음원(실제 악기 녹음, 최대 3개) — 비우면 안 씀
 
     def target_seconds(self, src: Source | None) -> float:
@@ -165,29 +166,56 @@ class MakeJob(QThread):
             self.finished_ok.emit(False, str(e))
 
     def _engine(self):
+        """필요한 모델을 받고(처음 한 번) 품질 선택에 맞는 환경으로 엔진을 켬. 환경이 지금 서버와 다르면 다시 켬."""
+        ps = self.ps = prompt.preset(self.plan.quality, xl_ok())
+        senv = dict(ps["env"])
+        self._need(ps["model"], key="engine")
+        lm = senv.get("ACESTEP_LM_MODEL_PATH")
+        if lm:
+            try:
+                self._need(lm, key="engine")
+            except EG.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 — 큰 작곡 담당을 못 받으면 평소 것으로
+                L.warning("작곡 담당 %s 준비 실패 → 평소 것으로: %s", lm, e)
+                senv.pop("ACESTEP_LM_MODEL_PATH", None)
         self.step.emit("engine", 0.0, "엔진 켜는 중(처음에는 모델을 읽느라 몇 분 걸릴 수 있음)")
         t0 = time.monotonic()
-        was = self.eng.running()
+        was = self.eng.running() and tuple(sorted(senv.items())) == getattr(self.eng, "env_key", ())
 
         def line(t):
             if '"GET /' in t or '"POST /' in t or "HTTP/1.1" in t:     # 서버 접속 기록은 숨김(엔진 로그에는 남음)
                 return
             self.step.emit("engine", 0.0, t[:120])
-        self.eng.start(line, self.stopped)
+        try:
+            self.eng.start(line, self.stopped, extra_env=senv)
+        except EG.Cancelled:
+            raise
+        except EG.EngineError as e:
+            if "ACESTEP_VAE_CHECKPOINT" not in senv:
+                raise
+            # 대체 음원 변환부를 못 받았을 수 있음(인터넷 없음 등) → 공식 변환부로 한 번 더
+            L.warning("대체 음원 변환부로 켜기 실패 → 공식 변환부로 다시: %s", e)
+            senv.pop("ACESTEP_VAE_CHECKPOINT", None)
+            self.step.emit("engine", 0.0, "대체 음원 변환부 없이 다시 켜는 중")
+            self.eng.start(line, self.stopped, extra_env=senv)
+        self.senv = senv
+        if ps["quality"] == "hq" and not (EG.external_url() or self.eng.dcw):
+            raise EG.EngineError("고품질(XL)은 DCW 를 꺼야 하는데 엔진을 고치지 못했습니다(dtmc.log). 기본 품질로 만드세요.")
         if not was:
             settings.put("start_" + hw.profile().mode, round(time.monotonic() - t0, 1))
         self.step.emit("engine", 1.0, "엔진 준비됨")
 
-    def _need(self, model: str, frac: float = 0.0, head: str = ""):
-        """모델이 없으면 내려받음(처음 한 번). 진행 글 = 생성 단계 막대에."""
+    def _need(self, model: str, frac: float = 0.0, head: str = "", key: str = "generate"):
+        """모델이 없으면 내려받음(처음 한 번). 진행 글 = key 단계 막대에."""
         if EG.model_ready(model):
             return
         name = prompt.MODEL_INFO.get(model, (model, 0))[0]
         t1 = time.monotonic()
 
         def dl(t):
-            self.step.emit("generate", frac, f"{head}{name} 내려받는 중 · {int(time.monotonic() - t1)}초 · {t[:50]}")
-        self.step.emit("generate", frac, f"{head}{name} 내려받는 중(처음 한 번)")
+            self.step.emit(key, frac, f"{head}{name} 내려받는 중 · {int(time.monotonic() - t1)}초 · {t[:50]}")
+        self.step.emit(key, frac, f"{head}{name} 내려받는 중(처음 한 번)")
         EG.download_model(model, dl, self.stopped)
 
     def _out_dir(self) -> Path:
@@ -217,7 +245,6 @@ class MakeJob(QThread):
             self.step.emit("analyze", 1.0, "")
         work = EG.tmp_dir() / time.strftime("job_%Y%m%d_%H%M%S")
         try:
-            self._need(prompt.GEN_MODEL)
             ref = self._ref(work)
             for i, s in enumerate(srcs):
                 self._make_one(i, len(srcs), s, work, out_dir, ref)
@@ -255,7 +282,8 @@ class MakeJob(QThread):
         wd.mkdir(parents=True, exist_ok=True)
         moods = self._moods(s)
         req = prompt.request(instr_keys=p.instruments, mood_keys=moods, seconds=sec, bpm=bpm, key_scale=key,
-                             ref_path=ref, candidates=p.candidates, profile=hw.profile())
+                             ref_path=ref, candidates=p.candidates, profile=hw.profile(), model=self.ps["model"],
+                             **self.ps["opt"])
         label = f"{i + 1}/{n} {s.name}"
         t0 = time.monotonic()
 
@@ -286,7 +314,9 @@ class MakeJob(QThread):
                "model": req.get("model"), "thinking": req.get("thinking"), "caption": req.get("prompt"),
                "lyrics": req.get("lyrics"), "negative": req.get("lm_negative_prompt"),
                "refs": list(self.plan.refs) if req.get("reference_audio_path") else [],
-               "seed": req.get("seed"), "mode": hw.profile().mode,
+               "seed": req.get("seed"), "mode": hw.profile().mode, "quality": getattr(self, "ps", {}).get("quality"),
+               "server_env": getattr(self, "senv", {}), "lm": getattr(self.eng, "lm_loaded", ""),
+               "dcw_enabled": req.get("dcw_enabled"),
                "analysis": a.to_dict() if a is not None else None}
         rec.update(more)
         return rec
@@ -297,13 +327,13 @@ class MakeJob(QThread):
         d.mkdir(parents=True, exist_ok=True)
         work = EG.tmp_dir() / time.strftime("test_%Y%m%d_%H%M%S")
         try:
-            self._need(prompt.GEN_MODEL)
             for i, k in enumerate(keys):
                 if self.cancel:
                     raise EG.Cancelled("취소했습니다")
                 ko = prompt.INSTR[k][0]
                 req = prompt.request(instr_keys=[k], mood_keys=["calm", "warm"], seconds=TEST_SECONDS, bpm=80,
-                                     key_scale="C major", candidates=1, profile=hw.profile())
+                                     key_scale="C major", candidates=1, profile=hw.profile(), model=self.ps["model"],
+                                     **self.ps["opt"])
                 t0 = time.monotonic()
 
                 def prog(f, text, i=i, ko=ko, t0=t0):
@@ -321,13 +351,12 @@ class MakeJob(QThread):
             shutil.rmtree(work, ignore_errors=True)
 
     def _run_compare(self, out_dir: Path):
-        """비교 시험(v0.1.10): 첫 원곡 기준 60초 · 같은 씨앗 · prompt.compare_cases 의 곡들.
-        서버 환경이 다른 곡(대체 음원 변환부 · 작곡 담당 4B)은 서버를 다시 켜서 만듦. 한 곡이 실패해도 나머지는 계속.
-        끝난 뒤 다음 [AUTO] 는 서버를 평소 설정으로 다시 켬(Engine.start 가 환경이 다르면 스스로 다시 켬)."""
+        """스타일 샘플(v0.1.11): 첫 원곡 기준 60초 · 같은 씨앗 · 고른 품질로 prompt.STYLES 를 한 곡씩.
+        원곡에서는 조성과(스타일 범위 안일 때만) 템포를 가져옴. 한 곡이 실패해도 나머지는 계속."""
         p = self.plan
         srcs = [s for s in self.sources if s.checked and not s.error]
         if not srcs:
-            raise EG.EngineError("비교할 원곡이 없습니다.")
+            raise EG.EngineError("기준으로 삼을 원곡이 없습니다.")
         s = srcs[0]
         if s.analysis is None and p.analyze_on:
             s.analysis = analyze.analyze_file(s.path)
@@ -335,59 +364,48 @@ class MakeJob(QThread):
         a, bpm, key = self._meta(s)
         sec = float(prompt.COMPARE_SECONDS)
         seed = random.randint(1, 2 ** 31 - 1)
-        moods = self._moods(s)
-        cases = prompt.compare_cases(xl_ok(), bool(EG.external_url() or getattr(self.eng, "dcw", False)))
-        n = len(cases)
+        styles = prompt.STYLES
+        n = len(styles)
         work = EG.tmp_dir() / time.strftime("cmp_%Y%m%d_%H%M%S")
         work.mkdir(parents=True, exist_ok=True)
-        ilab = prompt.instr_label(p.instruments)
+        qname = dict(prompt.QUALITIES)[self.ps["quality"]]
         failed = []
         try:
             ref = self._ref(work)
-            for i, (tag, name, model, opt, senv) in enumerate(cases):
+            for i, st in enumerate(styles):
                 if self.cancel:
                     raise EG.Cancelled("취소했습니다")
+                ko = st[1]
                 head = f"{i + 1}/{n} "
-                try:
-                    self._need(model, i / n, head)
-                    lm = senv.get("ACESTEP_LM_MODEL_PATH")
-                    if lm:
-                        self._need(lm, i / n, head)
-                    if tuple(sorted(senv.items())) != getattr(self.eng, "env_key", ()):
-                        t1 = time.monotonic()
-                        self.step.emit("generate", i / n, f"{head}{name} · 엔진 다시 켜는 중(설정 바꿈)")
-                        self.eng.start(lambda t, t1=t1, name=name: self.step.emit(
-                            "generate", i / n, f"{head}{name} · 엔진 다시 켜는 중 · {int(time.monotonic() - t1)}초"),
-                            self.stopped, extra_env=senv)
-                    if lm and not EG.external_url() and self.eng.lm_loaded and self.eng.lm_loaded != lm:
-                        raise EG.EngineError(f"작곡 담당을 {lm} 로 못 바꿈(서버가 {self.eng.lm_loaded} 를 읽음)")
-                    req = prompt.request(instr_keys=p.instruments, mood_keys=moods, seconds=sec, bpm=bpm,
-                                         key_scale=key, ref_path=ref, candidates=1, profile=hw.profile(), seed=seed,
-                                         model=model, **opt)
-                    t0 = time.monotonic()
+                req = prompt.style_request(st, seconds=sec, bpm=bpm, key_scale=key, ref_path=ref, profile=hw.profile(),
+                                           seed=seed, model=self.ps["model"], **self.ps["opt"])
+                t0 = time.monotonic()
 
-                    def prog(f, text, i=i, name=name, t0=t0):
-                        self.step.emit("generate", (i + min(0.95, max(0.0, f))) / n,
-                                       f"{i + 1}/{n} {name} · {int(time.monotonic() - t0)}초")
-                    self.step.emit("generate", i / n, f"{head}{name}")
+                def prog(f, text, i=i, ko=ko, t0=t0):
+                    self.step.emit("generate", (i + min(0.95, max(0.0, f))) / n,
+                                   f"{i + 1}/{n} {ko} · {int(time.monotonic() - t0)}초")
+                self.step.emit("generate", i / n, f"{head}{ko}")
+                try:
                     wavs = self.eng.generate(req, work / f"{i + 1}", prog, self.stopped)
                 except EG.Cancelled:
                     raise
-                except Exception as e:  # noqa: BLE001 — 이 곡만 건너뜀(메모리 부족 · 내려받기 실패 등)
-                    L.warning("비교 시험 %s 실패: %s", tag, e)
-                    failed.append(f"{name}: {e}")
-                    self.step.emit("generate", (i + 1) / n, f"{head}{name} 실패 — 건너뜀")
+                except Exception as e:  # noqa: BLE001 — 이 곡만 건너뜀
+                    L.warning("스타일 샘플 %s 실패: %s", ko, e)
+                    failed.append(f"{ko}: {e}")
+                    self.step.emit("generate", (i + 1) / n, f"{head}{ko} 실패 — 건너뜀")
+                    if not self.eng.running() and not EG.external_url():      # 엔진이 죽었으면 다시 켬
+                        self.eng.start(lambda t: None, self.stopped, extra_env=self.senv)
                     continue
-                stem = prompt.out_stem(p.title, s.name, p.instruments, tag, sec)
+                remember_speed(sec, time.monotonic() - t0)
+                stem = prompt.style_stem(p.title, s.name, i + 1, ko, sec)
                 out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
                 self.outputs.append(out)
-                self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "label": f"{i + 1}. {name}",
-                                "instr": ilab, "seed": seed, "n": 1, "of": 1, "seconds": sec})
-                write_history(self._record(req, s, [str(out)], moods, sec, a, kind="compare_v0110", case=tag,
-                                           options=opt, server_env=senv))
-                self.step.emit("generate", (i + 1) / n, f"{head}{name} 완료")
+                self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "label": f"{i + 1}. {ko}",
+                                "instr": qname, "seed": seed, "n": 1, "of": 1, "seconds": sec})
+                write_history(self._record(req, s, [str(out)], [], sec, a, kind="style_sample", style=st[0]))
+                self.step.emit("generate", (i + 1) / n, f"{head}{ko} 완료")
             if failed and not self.outputs:
-                raise EG.EngineError("비교 시험이 모두 실패했습니다: " + " / ".join(failed)[:300])
+                raise EG.EngineError("스타일 샘플이 모두 실패했습니다: " + " / ".join(failed)[:300])
             self.failed = failed
         finally:
             shutil.rmtree(work, ignore_errors=True)
@@ -399,12 +417,8 @@ def xl_ok() -> bool:
     return bool(g is not None and hw.profile().mode == "gpu" and g.vram_gb >= prompt.XL_VRAM)
 
 
-def needed_models(compare: bool) -> list:
-    """이번 작업에 필요한데 아직 없는 모델."""
-    ms = [prompt.GEN_MODEL]
-    if compare:
-        for _t, _n, m, _o, senv in prompt.compare_cases(xl_ok(), True):
-            for x in (m, senv.get("ACESTEP_LM_MODEL_PATH")):
-                if x and x not in ms:
-                    ms.append(x)
+def needed_models(quality: str) -> list:
+    """이 품질로 만드는 데 필요한데 아직 없는 모델."""
+    ps = prompt.preset(quality, xl_ok())
+    ms = [ps["model"]] + ([ps["env"]["ACESTEP_LM_MODEL_PATH"]] if "ACESTEP_LM_MODEL_PATH" in ps["env"] else [])
     return [m for m in ms if not EG.model_ready(m)]

@@ -54,22 +54,58 @@ ENV_LM4B = {"ACESTEP_LM_MODEL_PATH": LM_4B}
 XL_OPT = {"dcw_enabled": False}                  # XL 은 늘 DCW 끔(사용자 시험 11/18: 켜면 다른 악기가 새어 나옴)
 
 
-def compare_cases(xl: bool, dcw: bool) -> list:
-    """비교 시험(v0.1.10) 목록: (파일 꼬리표, 화면 이름, 모델, request 에 더할 설정, 서버 환경 변수).
-    기준 둘 = shift3(DCW 켬 그대로) · XL(DCW 끔)에서 하나씩만 바꿈: 16단계 / 대체 음원 변환부 / 작곡 담당 4B.
-    xl = XL 을 쓸 수 있는 컴퓨터 · dcw = 엔진이 DCW 값을 받는지(못 받으면 XL 은 뺌 — XL 은 반드시 DCW 끔).
-    서버를 다시 켜야 하는 것끼리 묶은 순서."""
-    bases = [("shift3", GEN_MODEL, {})]
-    if xl and dcw:
-        bases.append(("XL", XL_TURBO, dict(XL_OPT)))
-    groups = [("지금", "지금 설정", {}, {}), ("16단계", "16단계", {"inference_steps": 16}, {}),
-              ("변환부", "대체 음원 변환부", {}, ENV_VAE)]
-    if xl:
-        groups.append(("작곡4B", "작곡 담당 4B", {}, ENV_LM4B))
-    cases = [(f"{t}_{g}", f"{t} · {gname}", m, {**opt, **gopt}, genv)
-             for g, gname, gopt, genv in groups for t, m, opt in bases]
-    order = sorted(range(len(cases)), key=lambda k: (0 if not cases[k][4] else 1 if cases[k][4] is ENV_VAE else 2))
-    return [(f"{n + 1:02d}-{cases[k][0]}",) + cases[k][1:] for n, k in enumerate(order)]
+QUALITIES = [("std", "기본"), ("hq", "고품질(XL)")]
+
+
+def preset(quality: str, big_gpu: bool) -> dict:
+    """품질 선택 → 모델 · request 에 더할 값 · 서버 환경(v0.1.11, 사용자 시험 11/18로 정함).
+    기본 = shift3(DCW 그대로) + 작곡 담당 4B(큰 그래픽 메모리일 때만) + 대체 음원 변환부
+    고품질 = XL(DCW 끔) + 작곡 담당 1.7B + 대체 음원 변환부 — XL + 4B 는 24GB 에서 실패해 함께 안 씀. 8단계 유지(16단계 = 먹먹함)."""
+    if quality == "hq" and big_gpu:
+        return {"quality": "hq", "model": XL_TURBO, "opt": dict(XL_OPT), "env": dict(ENV_VAE)}
+    env = dict(ENV_VAE)
+    if big_gpu:
+        env.update(ENV_LM4B)
+    return {"quality": "std", "model": GEN_MODEL, "opt": {}, "env": env}
+
+
+# ------------------------------------------------------------ 스타일(영상 배경음악용, v0.1.11 샘플 시험)
+# (키, 화면 이름, 지시문(장르 + 묘사), 어울리는 템포 범위) — 원곡 템포가 범위 안일 때만 원곡 템포를 씀
+STYLES = [
+    ("ambient", "수중 앰비언트", "Ambient, underwater atmosphere. Soft evolving synth pads, slow gentle piano notes and "
+     "long lush reverb, deep and spacious, floating and weightless. Calm, serene, dreamy mood.", (50, 95)),
+    ("cinematic", "시네마틱", "Cinematic, orchestral soundtrack. Emotional piano with warm string ensemble, slowly building "
+     "to a wide, uplifting climax. Rich, polished film-score sound. Hopeful, majestic mood.", (60, 120)),
+    ("chill", "칠아웃", "Chillout, downtempo electronica. Smooth electric piano chords, soft mellow beat, warm sub bass and "
+     "airy pads, laid-back groove. Relaxed, sunny, peaceful mood.", (75, 110)),
+    ("tropical", "트로피컬 어쿠스틱", "Tropical acoustic, feel-good. Bright fingerpicked acoustic guitar and ukulele, light hand "
+     "percussion and shaker, gentle bass. Warm live recording. Cheerful, breezy, carefree mood.", (90, 130)),
+    ("lofi", "로파이", "Lo-fi hip hop, chill. Warm mellow electric piano, relaxed dusty drum beat, soft bass and vinyl "
+     "crackle, jazzy chords. Cozy, nostalgic, laid-back mood.", (65, 95)),
+    ("piano", "피아노 중심", "Neo-classical, piano with strings. Expressive grand piano melody performed live with natural "
+     "dynamics, joined by subtle warm strings. Intimate room recording. Tender, reflective mood.", (55, 110)),
+    ("pop", "밝은 팝 연주곡", "Upbeat pop instrumental. Bright piano and clean electric guitar, punchy drums and melodic bass, "
+     "catchy hook. Polished modern production. Uplifting, energetic, joyful mood.", (100, 135)),
+    ("jazz", "재즈 트리오", "Jazz trio, smooth lounge jazz. Elegant piano improvisation, walking upright bass and soft brushed "
+     "drums. Warm intimate club recording. Relaxed, sophisticated mood.", (80, 140)),
+    ("epic", "에픽 오케스트라", "Epic orchestral, trailer music. Powerful full orchestra with soaring strings, bold brass and "
+     "thunderous percussion, driving ostinato. Huge cinematic sound. Triumphant, heroic mood.", (90, 150)),
+    ("synthwave", "신스웨이브", "Synthwave, retro 80s. Analog synth arpeggios, lush pads, steady electronic drums and pulsing "
+     "bass. Night drive atmosphere. Dreamy, nostalgic, driving mood.", (90, 125)),
+]
+STYLE_LYRICS = "[Intro]\n\n[Main Theme]\n\n[Build]\n\n[Outro - fade out]"
+STYLE_NEGATIVE = "vocals, singing, voice, rap, choir, spoken word"
+
+
+def style_request(style: tuple, *, seconds, bpm=None, key_scale="", profile=None, seed=None, ref_path=None,
+                  model=GEN_MODEL, **extra) -> dict:
+    """스타일 한 곡 요청. 원곡 템포는 스타일 범위 안일 때만 씀(아니면 엔진이 정함) · 조성은 원곡 것."""
+    _k, _ko, cap, (lo, hi) = style
+    use_bpm = bpm if bpm and lo <= float(bpm) <= hi else None
+    req = request(instr_keys=["piano"], mood_keys=[], seconds=seconds, bpm=use_bpm, key_scale=key_scale,
+                  profile=profile, seed=seed, ref_path=ref_path, model=model, **extra)
+    req.update({"prompt": cap, "lyrics": STYLE_LYRICS, "lm_negative_prompt": STYLE_NEGATIVE})
+    return req
 
 
 LEN_MIN, LEN_MAX = 10, 600
@@ -221,3 +257,9 @@ def out_stem(title: str, source_name: str, instr_keys, tag, seconds) -> str:
     """[제목]_[악기]_[번호 또는 반영NN]_[길이]. 제목이 비면 원곡 이름 첫 단어."""
     t = safe(title.strip()) if title and title.strip() else first_word(source_name)
     return f"{t}_{instr_label(instr_keys)}_{tag}_{len_tag(seconds)}"
+
+
+def style_stem(title: str, source_name: str, n: int, style_ko: str, seconds) -> str:
+    """스타일 샘플 파일 이름: 제목_번호-스타일_길이."""
+    t = safe(title.strip()) if title and title.strip() else first_word(source_name)
+    return f"{t}_{n:02d}-{safe(style_ko)}_{len_tag(seconds)}"

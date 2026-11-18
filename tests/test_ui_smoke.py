@@ -76,6 +76,7 @@ w.instr.set_value(["piano", "strings"])
 w.cand.set_value("2")
 w._sync()
 shot(w, "03_work_generate.png")
+assert w.quality.isHidden() and w.plan().quality == "std"                 # XL 못 쓰는 컴퓨터 = 품질 선택 없음
 assert not hasattr(w, "slider")                                           # 원곡 반영 슬라이더 삭제
 w._open_stage("analyze")
 assert w.bpm_mode.isEnabled()                                             # 템포 잠금 없음
@@ -126,7 +127,12 @@ hw.gpu = lambda: hw.Gpu("시험 GPU", 24.0, "999.0")
 hw._PROFILE = hw.Profile("gpu", "GPU · 시험", True, "acestep-5Hz-lm-1.7B", True, 2)
 w._set_refs([str(a2), str(a1)])
 assert "Night Drive" in w.ref_lab.text() and "외 1개" in w.ref_lab.text()
-assert "8곡" in w.cmp_hint.text(), w.cmp_hint.text()
+assert "10가지" in w.cmp_hint.text(), w.cmp_hint.text()
+w._sync()
+assert not w.quality.isHidden()                                           # 큰 GPU = 품질 선택 보임
+w.quality.set_value("hq")
+w._sync()
+assert w.plan().quality == "hq"
 shot(w, "03c_work_generate_ref.png")
 w.start_compare()
 for _ in range(1500):
@@ -139,7 +145,7 @@ from PySide6.QtCore import QEvent  # noqa: E402
 app.sendPostedEvents(None, QEvent.DeferredDelete)      # 지난 결과 줄(deleteLater) 정리
 rows = w.findChildren(ResultRow)
 names = sorted(Path(r.path).name for r in rows)
-assert len(names) == 8 and names[0] == "봄날의_피아노+스트링_01-shift3_지금_1m.mp3", names
+assert len(names) == 10 and names[0] == "봄날의_01-수중 앰비언트_1m.mp3", names
 shot(w, "08_compare_done.png")
 w.back_to_setup()
 print("OK test_ui_smoke")

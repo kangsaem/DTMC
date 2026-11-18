@@ -91,38 +91,50 @@ plan = jobs.Plan(instruments=["piano"], length_mode="set", seconds=10, bpm_mode=
 res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan))
 assert res.get("ok") and json.loads(urllib.request.urlopen(url + "/_requests").read())[-1]["bpm"] == 72
 
-# 비교 시험(v0.1.10): 기준 둘(shift3 = DCW 그대로 · XL = DCW 끔) × (지금 / 16단계 / 대체 변환부 / 작곡 4B) = 8곡
+# 품질 선택(v0.1.11): 기본 = shift3 + 작곡 4B(큰 GPU) + 대체 변환부 · 고품질 = XL(DCW 끔) + 대체 변환부
 from dtmc import hw  # noqa: E402
+
+ps = prompt.preset("std", True)
+assert ps["model"] == prompt.GEN_MODEL and ps["opt"] == {} and ps["env"] == {**prompt.ENV_VAE, **prompt.ENV_LM4B}
+ps = prompt.preset("hq", True)
+assert ps["model"] == prompt.XL_TURBO and ps["opt"] == {"dcw_enabled": False} and ps["env"] == prompt.ENV_VAE
+ps = prompt.preset("hq", False)                                # XL 못 쓰는 컴퓨터 = 늘 기본(작곡 4B 없이)
+assert ps["quality"] == "std" and ps["model"] == prompt.GEN_MODEL and ps["env"] == prompt.ENV_VAE
+e = engine.Engine()
+assert e.server_env(prompt.ENV_VAE)["ACESTEP_VAE_CHECKPOINT"] == "scragvae" and "ACESTEP_VAE_CHECKPOINT" not in e.server_env()
 
 real_gpu = hw.gpu
 hw.gpu = lambda: hw.Gpu("시험 GPU", 24.0, "999.0")
 hw._PROFILE = hw.Profile("gpu", "test", True, "acestep-5Hz-lm-1.7B", True, 2)
 n0 = len(json.loads(urllib.request.urlopen(url + "/_requests").read()))
-plan = jobs.Plan(instruments=["piano"], fmt="mp3", out_dir=str(tmp / "cmp"), title="Tsuki", refs=[str(ref1)])
+plan = jobs.Plan(instruments=["piano"], length_mode="set", seconds=10, quality="hq", out_dir=str(tmp / "hq"))
+job = jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan)
+res, items = run_job(job)
+r = json.loads(urllib.request.urlopen(url + "/_requests").read())[-1]
+assert res.get("ok") and r["model"] == prompt.XL_TURBO and r["dcw_enabled"] is False and r["inference_steps"] == 8, r
+assert job.senv == prompt.ENV_VAE and job.ps["quality"] == "hq"
+job = jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], jobs.Plan(length_mode="set", seconds=10, out_dir=str(tmp / "hq")))
+res, items = run_job(job)
+r = json.loads(urllib.request.urlopen(url + "/_requests").read())[-1]
+assert res.get("ok") and r["model"] == prompt.GEN_MODEL and "dcw_enabled" not in r
+assert job.senv == {**prompt.ENV_VAE, **prompt.ENV_LM4B}, job.senv
+
+# 비교 시험 = 스타일 샘플 10곡(고른 품질 · 같은 씨앗)
+n0 = len(json.loads(urllib.request.urlopen(url + "/_requests").read()))
+plan = jobs.Plan(fmt="mp3", out_dir=str(tmp / "cmp"), title="Dive", quality="hq")
 res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan, compare=True))
-assert res.get("ok") and len(items) == 8, (res, len(items))
+assert res.get("ok") and len(items) == len(prompt.STYLES) == 10, (res, len(items))
 names = [Path(i["path"]).name for i in items]
-want = ["01-shift3_지금", "02-XL_지금", "03-shift3_16단계", "04-XL_16단계", "05-shift3_변환부", "06-XL_변환부",
-        "07-shift3_작곡4B", "08-XL_작곡4B"]
-assert names == [f"Tsuki_피아노_{x}_1m.mp3" for x in want], names
+assert names[0] == "Dive_01-수중 앰비언트_1m.mp3" and names[-1] == "Dive_10-신스웨이브_1m.mp3", names
 creq = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:]
-assert [r["model"][-8:] for r in creq] == ["o-shift3", "xl-turbo"] * 4, [r["model"] for r in creq]
-assert all("dcw_enabled" not in r for r in creq[0::2]) and all(r["dcw_enabled"] is False for r in creq[1::2])   # shift3 그대로 · XL 은 늘 끔
-assert [r["inference_steps"] for r in creq] == [8, 8, 16, 16, 8, 8, 8, 8]
-assert len({r["seed"] for r in creq}) == 1 and len({r["prompt"] for r in creq}) == 1 and len({r["lyrics"] for r in creq}) == 1
-cs = prompt.compare_cases(True, True)
-assert [c[4] for c in cs] == [{}, {}, {}, {}, prompt.ENV_VAE, prompt.ENV_VAE, prompt.ENV_LM4B, prompt.ENV_LM4B]
-assert all(c[2] == prompt.GEN_MODEL for c in prompt.compare_cases(True, False))       # DCW 못 끄면 XL 은 뺌
-assert prompt.LM_4B in [m for m in ("acestep-5Hz-lm-4B",)]
-e = engine.Engine()
-env1 = e.server_env(prompt.ENV_VAE)
-assert env1["ACESTEP_VAE_CHECKPOINT"] == "scragvae" and "ACESTEP_VAE_CHECKPOINT" not in e.server_env()
-assert e.server_env(prompt.ENV_LM4B)["ACESTEP_LM_MODEL_PATH"] == "acestep-5Hz-lm-4B"
+assert all(r["model"] == prompt.XL_TURBO and r["dcw_enabled"] is False and r["task_type"] == "text2music" for r in creq)
+assert len({r["seed"] for r in creq}) == 1 and len({r["prompt"] for r in creq}) == 10
+assert creq[0]["prompt"].startswith("Ambient") and "vocals" in creq[0]["lm_negative_prompt"]
+assert all(r["key_scale"] == "C major" for r in creq)                       # 조성 = 원곡 것
+assert "bpm" not in creq[0] and creq[3]["bpm"] in (95, 96, 97), (creq[0].get("bpm"), creq[3].get("bpm"))   # 템포 = 스타일 범위 안일 때만(원곡 96)
 hw.gpu = real_gpu
-hw._PROFILE = hw.Profile("cpu", "test", False, "", False, 1)
-assert [c[0] for c in prompt.compare_cases(jobs.xl_ok(), False)] == ["01-shift3_지금", "02-shift3_16단계", "03-shift3_변환부"]
 hw._PROFILE = None
-print("compare ok", len(names))
+print("style samples ok", len(names))
 
 # 악기 시험
 plan = jobs.Plan(fmt="mp3", out_dir=str(tmp / "out"))

@@ -470,10 +470,14 @@ class WorkWindow(DragMove, QWidget):
         lrow.addWidget(self.secs_lab)
         self.cand = Seg([(str(i), f"{i}곡") for i in (1, 2, 3, 4)], str(hw.profile().candidates))
         self.cand.changed.connect(lambda _k: self._sync())
+        self.quality = Seg(prompt.QUALITIES, "std")
+        self.quality.changed.connect(lambda _k: self._sync())
+        self._q_row = labeled("품질", self.quality)
+        self.quality.setToolTip("기본 = 가볍고 선명 · 고품질 = 음색이 풍부(더 느림). 바꾸면 엔진을 다시 켭니다.")
         self.b_test = small_button("악기 시험", 88, 28, "8개 악기를 20초씩 만들어 음질을 비교(원곡 필요 없음)")
         self.b_test.clicked.connect(self.start_test)
         self.b_cmp = small_button("비교 시험", 88, 28,
-                                  f"첫 원곡 기준 {prompt.COMPARE_SECONDS}초를 같은 씨앗으로, 설정만 바꿔 가며 여러 곡 만듭니다")
+                                  f"배경음악 스타일 {len(prompt.STYLES)}가지를 {prompt.COMPARE_SECONDS}초씩(고른 품질 · 같은 씨앗)")
         self.b_cmp.clicked.connect(self.start_compare)
         trow = QHBoxLayout()
         trow.setSpacing(8)
@@ -496,10 +500,9 @@ class WorkWindow(DragMove, QWidget):
         rrow.addWidget(b_ref)
         rrow.addWidget(b_refx)
         self._ref_row = labeled("음색 참고", rrow)
-        self.ref_hint = self._hint("선택 사항 · 같은 악기(같은 편성)의 실제 연주 녹음만 넣으세요. 비우면 쓰지 않습니다.")
+        self.ref_lab.setToolTip("선택 사항 · 같은 악기(같은 편성)의 실제 연주 녹음만 넣으세요. 비우면 쓰지 않습니다.")
         return self._body([labeled("악기", self.instr), labeled("", self.instr_note), labeled("길이", lrow),
-                           labeled("후보", self.cand), self._ref_row,
-                           labeled("", self.ref_hint), trow])
+                           labeled("후보", self.cand), self._q_row, self._ref_row, trow])
 
     def _output_body(self) -> QWidget:
         self.fmt = Seg(ff.FORMAT_NAMES, "mp3")
@@ -537,6 +540,7 @@ class WorkWindow(DragMove, QWidget):
         self.len_mode.set_value(c.get("length_mode", "src"))
         self.secs.setValue(int(c.get("seconds", 60)))
         self.cand.set_value(str(c.get("candidates", hw.profile().candidates)))
+        self.quality.set_value(c.get("quality", "std") if jobs.xl_ok() else "std")
         self.fmt.set_value(c.get("fmt", "mp3"))
         self.out_dir = c.get("out_dir", "")
         self.refs = [f for f in (c.get("refs") or []) if f and Path(f).is_file()][: prompt.MAX_REFS]
@@ -551,7 +555,7 @@ class WorkWindow(DragMove, QWidget):
             "analyze_on": p.analyze_on, "mood_mode": self.mood_mode.value(), "moods": self.manual_moods,
             "bpm_mode": p.bpm_mode, "bpm": p.bpm, "instruments": p.instruments, "length_mode": p.length_mode,
             "seconds": p.seconds, "candidates": p.candidates, "fmt": p.fmt,
-            "out_dir": self.out_dir, "refs": self.refs,
+            "out_dir": self.out_dir, "refs": self.refs, "quality": p.quality,
             "open": next((k for k, s in self.stages.items() if s.open_), ""),
         })
 
@@ -562,7 +566,8 @@ class WorkWindow(DragMove, QWidget):
                          bpm=self.bpm.value(), instruments=self.instr.value() or ["piano"],
                          length_mode=self.len_mode.value(), seconds=self.secs.value(),
                          candidates=int(self.cand.value()), fmt=self.fmt.value(), out_dir=self.out_dir,
-                         title=self.title.text().strip(), refs=list(self.refs))
+                         title=self.title.text().strip(), refs=list(self.refs),
+                         quality=self.quality.value() if jobs.xl_ok() else "std")
 
     def _out_dir(self) -> Path:
         return Path(self.out_dir) if self.out_dir else paths.default_out_dir()
@@ -626,18 +631,24 @@ class WorkWindow(DragMove, QWidget):
         an.set_summary(f"{mood_txt} · " + ("원곡 템포" if p.bpm_mode == "src" else f"{p.bpm} BPM"))
         len_txt = "원곡 길이" if p.length_mode == "src" else mmss(p.seconds)
         self.stages["generate"].set_summary(f"{prompt.instr_label(p.instruments)} · {len_txt} · 후보 {p.candidates}"
+                                            + (" · 고품질" if p.quality == "hq" else "")
                                             + (" · 음색 참고" if self.refs else ""))
-        nc = len(prompt.compare_cases(jobs.xl_ok(), True))
-        self.cmp_hint.setText(f"비교 시험 = {prompt.COMPARE_SECONDS}초 · 같은 씨앗 · {nc}곡"
-                              "(단계 수 / 음원 변환부 / 작곡 담당).")
+        self.cmp_hint.setText(f"비교 시험 = 배경음악 스타일 {len(prompt.STYLES)}가지를 {prompt.COMPARE_SECONDS}초씩"
+                              "(고른 품질 · 같은 씨앗).")
+        big = jobs.xl_ok()
+        for i in range(self._q_row.count()):                           # 품질 선택은 XL 을 쓸 수 있는 컴퓨터에서만
+            w_ = self._q_row.itemAt(i).widget()
+            if w_ is not None:
+                w_.setVisible(big)
         cur = self._current()
         self.title.setPlaceholderText("비우면 원곡 이름 첫 단어" + (f" (예: {prompt.first_word(cur.name)})" if cur else ""))
         if not self.refs:
-            rt = "없음(쓰지 않음)"
+            rt = "없음 — 실제 연주 녹음을 넣으면 음색만 참고"
         else:
             rt = Path(self.refs[0]).name + (f" 외 {len(self.refs) - 1}개" if len(self.refs) > 1 else "")
         self.ref_lab.setText(self.ref_lab.fontMetrics().elidedText(rt, Qt.ElideMiddle, 250))
-        self.ref_lab.setToolTip("\n".join(self.refs))
+        if self.refs:
+            self.ref_lab.setToolTip("\n".join(self.refs))
         self.out_lab.setText(self.out_lab.fontMetrics().elidedText(str(self._out_dir()), Qt.ElideMiddle, 250))
         self.stages["output"].set_summary((f"{p.title} · " if p.title else "") + f"{p.fmt.upper()} · {self._out_dir().name}")
         # 요약 · 예상 시간
@@ -807,7 +818,7 @@ class WorkWindow(DragMove, QWidget):
 
     def _confirm_models(self, compare: bool) -> bool:
         """필요한 모델이 없으면 내려받아도 되는지 묻기(크기 · 남은 공간). 내려받기는 작업 안에서."""
-        need = jobs.needed_models(compare)
+        need = jobs.needed_models(self.plan().quality)
         if not need:
             return True
         gb = sum(prompt.MODEL_INFO[m][1] for m in need)
@@ -889,7 +900,7 @@ class WorkWindow(DragMove, QWidget):
         taskbar.flash(self)
         if ok:
             self.step_bar.finish(msg)
-            self.run_lab.halt(f"완료 · {msg}" + (" · 차례로 들어 보고 어느 번호가 나은지 알려 주세요"
+            self.run_lab.halt(f"완료 · {msg}" + (" · 들어 보고 쓸 만한 스타일을 알려 주세요"
                                                 if self._compare else ""))
         else:
             self.run_lab.halt(msg)
