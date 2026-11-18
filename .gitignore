@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# 모델·외부 도구 (용량 큼)
+checkpoints/
+models/
+ACE-Step-1.5/
+ffmpeg/
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+
+# 입력·생성 음원
+input/
+output/
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+
+# 로그·기타
+logs/
+*.log
+.DS_Store
+Thumbs.db
