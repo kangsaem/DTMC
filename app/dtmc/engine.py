@@ -500,6 +500,7 @@ class Engine:
     def __init__(self):
         self.dcw = bool(external_url())           # 엔진이 DCW 값을 받는지(start 에서 정해짐 · 가짜 엔진 = 받는다고 봄)
         self.cur_model, self.model_note = MAIN_MODEL, ""
+        self.env_key, self.lm_loaded = (), ""
         self.proc: subprocess.Popen | None = None
         self.base = external_url()
         self.lines: list[str] = []
@@ -520,8 +521,13 @@ class Engine:
         except Exception:  # noqa: BLE001
             return False
 
-    def server_env(self) -> dict:
-        """엔진 서버 환경 변수(실행 모드·언어 모델·모델 미리 읽기·임시 폴더)."""
+    def server_env(self, extra: dict | None = None) -> dict:
+        """엔진 서버 환경 변수(실행 모드·언어 모델·모델 미리 읽기·임시 폴더). extra = 덧씌울 값(비교 시험)."""
+        e = self._server_env()
+        e.update(extra or {})
+        return e
+
+    def _server_env(self) -> dict:
         e = env()
         pr = self.profile
         lm_ok = bool(pr.lm_model) and (checkpoints() / pr.lm_model).is_dir()   # 기본 설치 = 1.7B 만 받음
@@ -545,7 +551,13 @@ class Engine:
         e["ACESTEP_DOWNLOAD_SOURCE"] = "auto"
         return e
 
-    def start(self, on_line=lambda t: None, should_stop=lambda: False, timeout: float = 1800.0) -> None:
+    def start(self, on_line=lambda t: None, should_stop=lambda: False, timeout: float = 1800.0,
+              extra_env: dict | None = None) -> None:
+        """서버 켜기. extra_env(대체 음원 변환부 · 작곡 담당 4B 처럼 켤 때만 정해지는 것)가 지금 서버와 다르면 다시 켬."""
+        key = tuple(sorted((extra_env or {}).items()))
+        if key != getattr(self, "env_key", ()) and not external_url():
+            self.stop()
+        self.env_key = key
         if external_url():
             self.base = external_url()
             if not self._health(5):
@@ -558,13 +570,14 @@ class Engine:
             raise EngineError("생성 엔진이 아직 설치되지 않았습니다.")
         port = _free_port()
         self.base = f"http://127.0.0.1:{port}"
-        e = self.server_env()
+        e = self.server_env(extra_env)
         pr = self.profile
         cmd = python_prefix("acestep.api_server") + ["--host", "127.0.0.1", "--port", str(port)]
         L.info("엔진 시작(%s): %s", pr.label, " ".join(cmd))
         log.engine_line("$ " + " ".join(cmd))
         self.lines = []
         self.cur_model, self.model_note = start_model(), ""
+        self.lm_loaded = ""
         self.dcw = patch_dcw()
         self.proc = subprocess.Popen(cmd, cwd=str(project()), env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      stdin=subprocess.DEVNULL, creationflags=hw.NO_WINDOW)
@@ -577,6 +590,8 @@ class Engine:
                     log.engine_line(t)
                     self.lines.append(t)
                     del self.lines[:-200]
+                    if "LLM model loaded:" in t:                          # 실제로 읽힌 작곡 담당(서버가 다른 것으로 바꿀 수 있음)
+                        self.lm_loaded = t.rsplit(":", 1)[1].strip()
                     if "Model loaded on demand:" in t:                    # 서버가 모델을 바꿔 읽음
                         self.cur_model = t.rsplit(":", 1)[1].strip()
                     elif "using primary" in t or "on-demand load of" in t:  # 못 바꿈(조용히 기본 모델로 만듦)

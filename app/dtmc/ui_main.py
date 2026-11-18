@@ -628,8 +628,8 @@ class WorkWindow(DragMove, QWidget):
         self.stages["generate"].set_summary(f"{prompt.instr_label(p.instruments)} · {len_txt} · 후보 {p.candidates}"
                                             + (" · 음색 참고" if self.refs else ""))
         nc = len(prompt.compare_cases(jobs.xl_ok(), True))
-        self.cmp_hint.setText(f"비교 시험 = {prompt.COMPARE_SECONDS}초를 같은 씨앗으로, 설정만 바꿔 최대 {nc}곡"
-                              + ("(XL 중심)." if jobs.xl_ok() else "."))
+        self.cmp_hint.setText(f"비교 시험 = {prompt.COMPARE_SECONDS}초 · 같은 씨앗 · {nc}곡"
+                              "(단계 수 / 음원 변환부 / 작곡 담당).")
         cur = self._current()
         self.title.setPlaceholderText("비우면 원곡 이름 첫 단어" + (f" (예: {prompt.first_word(cur.name)})" if cur else ""))
         if not self.refs:

@@ -139,6 +139,7 @@ class MakeJob(QThread):
         super().__init__(parent)
         self.eng, self.sources, self.plan, self.test, self.compare = eng, list(sources), plan, test, compare
         self.cancel = False
+        self.failed: list[str] = []                # 비교 시험에서 건너뛴 곡(이유)
         self.outputs: list[Path] = []
 
     def stopped(self) -> bool:
@@ -155,7 +156,8 @@ class MakeJob(QThread):
             self._run()
             n = len(self.outputs)
             took = time.monotonic() - t_all
-            self.finished_ok.emit(True, f"{n}곡 저장 · {int(took // 60)}분 {int(took % 60)}초")
+            self.finished_ok.emit(True, f"{n}곡 저장 · {int(took // 60)}분 {int(took % 60)}초"
+                                  + (f" · {len(self.failed)}곡 실패(dtmc.log)" if self.failed else ""))
         except EG.Cancelled:
             self.finished_ok.emit(False, "취소했습니다")
         except Exception as e:  # noqa: BLE001
@@ -319,9 +321,9 @@ class MakeJob(QThread):
             shutil.rmtree(work, ignore_errors=True)
 
     def _run_compare(self, out_dir: Path):
-        """설정 비교(v0.1.9): 첫 원곡 기준 60초 · 같은 씨앗으로 설정만 바꿔 가며 여러 곡(prompt.compare_cases).
-        XL 을 쓸 수 있으면 XL turbo 로(다른 악기가 새어 나오는 것을 줄이는 설정 찾기) + XL SFT, 아니면 shift3 로.
-        없는 모델은 먼저 내려받음. 다음 [AUTO] 는 요청에 기본 모델을 적으므로 서버가 스스로 되돌림."""
+        """비교 시험(v0.1.10): 첫 원곡 기준 60초 · 같은 씨앗 · prompt.compare_cases 의 곡들.
+        서버 환경이 다른 곡(대체 음원 변환부 · 작곡 담당 4B)은 서버를 다시 켜서 만듦. 한 곡이 실패해도 나머지는 계속.
+        끝난 뒤 다음 [AUTO] 는 서버를 평소 설정으로 다시 켬(Engine.start 가 환경이 다르면 스스로 다시 켬)."""
         p = self.plan
         srcs = [s for s in self.sources if s.checked and not s.error]
         if not srcs:
@@ -339,29 +341,54 @@ class MakeJob(QThread):
         work = EG.tmp_dir() / time.strftime("cmp_%Y%m%d_%H%M%S")
         work.mkdir(parents=True, exist_ok=True)
         ilab = prompt.instr_label(p.instruments)
+        failed = []
         try:
             ref = self._ref(work)
-            for i, (tag, name, model, opt) in enumerate(cases):
+            for i, (tag, name, model, opt, senv) in enumerate(cases):
                 if self.cancel:
                     raise EG.Cancelled("취소했습니다")
-                self._need(model, i / n, f"{i + 1}/{n} ")
-                req = prompt.request(instr_keys=p.instruments, mood_keys=moods, seconds=sec, bpm=bpm, key_scale=key,
-                                     ref_path=ref, candidates=1, profile=hw.profile(), seed=seed, model=model, **opt)
-                t0 = time.monotonic()
+                head = f"{i + 1}/{n} "
+                try:
+                    self._need(model, i / n, head)
+                    lm = senv.get("ACESTEP_LM_MODEL_PATH")
+                    if lm:
+                        self._need(lm, i / n, head)
+                    if tuple(sorted(senv.items())) != getattr(self.eng, "env_key", ()):
+                        t1 = time.monotonic()
+                        self.step.emit("generate", i / n, f"{head}{name} · 엔진 다시 켜는 중(설정 바꿈)")
+                        self.eng.start(lambda t, t1=t1, name=name: self.step.emit(
+                            "generate", i / n, f"{head}{name} · 엔진 다시 켜는 중 · {int(time.monotonic() - t1)}초"),
+                            self.stopped, extra_env=senv)
+                    if lm and not EG.external_url() and self.eng.lm_loaded and self.eng.lm_loaded != lm:
+                        raise EG.EngineError(f"작곡 담당을 {lm} 로 못 바꿈(서버가 {self.eng.lm_loaded} 를 읽음)")
+                    req = prompt.request(instr_keys=p.instruments, mood_keys=moods, seconds=sec, bpm=bpm,
+                                         key_scale=key, ref_path=ref, candidates=1, profile=hw.profile(), seed=seed,
+                                         model=model, **opt)
+                    t0 = time.monotonic()
 
-                def prog(f, text, i=i, name=name, t0=t0):
-                    self.step.emit("generate", (i + min(0.95, max(0.0, f))) / n,
-                                   f"{i + 1}/{n} {name} · {int(time.monotonic() - t0)}초")
-                self.step.emit("generate", i / n, f"{i + 1}/{n} {name}")
-                wavs = self.eng.generate(req, work / f"{i + 1}", prog, self.stopped)
+                    def prog(f, text, i=i, name=name, t0=t0):
+                        self.step.emit("generate", (i + min(0.95, max(0.0, f))) / n,
+                                       f"{i + 1}/{n} {name} · {int(time.monotonic() - t0)}초")
+                    self.step.emit("generate", i / n, f"{head}{name}")
+                    wavs = self.eng.generate(req, work / f"{i + 1}", prog, self.stopped)
+                except EG.Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001 — 이 곡만 건너뜀(메모리 부족 · 내려받기 실패 등)
+                    L.warning("비교 시험 %s 실패: %s", tag, e)
+                    failed.append(f"{name}: {e}")
+                    self.step.emit("generate", (i + 1) / n, f"{head}{name} 실패 — 건너뜀")
+                    continue
                 stem = prompt.out_stem(p.title, s.name, p.instruments, tag, sec)
                 out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
                 self.outputs.append(out)
                 self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "label": f"{i + 1}. {name}",
                                 "instr": ilab, "seed": seed, "n": 1, "of": 1, "seconds": sec})
-                write_history(self._record(req, s, [str(out)], moods, sec, a, kind="compare_settings", case=tag,
-                                           options=opt))
-                self.step.emit("generate", (i + 1) / n, f"{i + 1}/{n} {name} 완료")
+                write_history(self._record(req, s, [str(out)], moods, sec, a, kind="compare_v0110", case=tag,
+                                           options=opt, server_env=senv))
+                self.step.emit("generate", (i + 1) / n, f"{head}{name} 완료")
+            if failed and not self.outputs:
+                raise EG.EngineError("비교 시험이 모두 실패했습니다: " + " / ".join(failed)[:300])
+            self.failed = failed
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -376,7 +403,8 @@ def needed_models(compare: bool) -> list:
     """이번 작업에 필요한데 아직 없는 모델."""
     ms = [prompt.GEN_MODEL]
     if compare:
-        for _t, _n, m, _o in prompt.compare_cases(xl_ok(), False):
-            if m not in ms:
-                ms.append(m)
+        for _t, _n, m, _o, senv in prompt.compare_cases(xl_ok(), True):
+            for x in (m, senv.get("ACESTEP_LM_MODEL_PATH")):
+                if x and x not in ms:
+                    ms.append(x)
     return [m for m in ms if not EG.model_ready(m)]

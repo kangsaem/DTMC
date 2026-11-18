@@ -91,7 +91,7 @@ plan = jobs.Plan(instruments=["piano"], length_mode="set", seconds=10, bpm_mode=
 res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan))
 assert res.get("ok") and json.loads(urllib.request.urlopen(url + "/_requests").read())[-1]["bpm"] == 72
 
-# 비교 시험 = 설정 비교(같은 씨앗). 그래픽 메모리 24GB → shift3 기준 + XL turbo 7 + XL SFT 2 = 10곡
+# 비교 시험(v0.1.10): 기준 둘(shift3 = DCW 그대로 · XL = DCW 끔) × (지금 / 16단계 / 대체 변환부 / 작곡 4B) = 8곡
 from dtmc import hw  # noqa: E402
 
 real_gpu = hw.gpu
@@ -100,25 +100,27 @@ hw._PROFILE = hw.Profile("gpu", "test", True, "acestep-5Hz-lm-1.7B", True, 2)
 n0 = len(json.loads(urllib.request.urlopen(url + "/_requests").read()))
 plan = jobs.Plan(instruments=["piano"], fmt="mp3", out_dir=str(tmp / "cmp"), title="Tsuki", refs=[str(ref1)])
 res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan, compare=True))
-assert res.get("ok") and len(items) == 10, (res, len(items))
+assert res.get("ok") and len(items) == 8, (res, len(items))
 names = [Path(i["path"]).name for i in items]
-assert names[0] == "Tsuki_피아노_01-shift3_1m.mp3" and names[1] == "Tsuki_피아노_02-XL_지금_1m.mp3", names
-assert names[-1] == "Tsuki_피아노_10-XLSFT_CFG7_1m.mp3", names
+want = ["01-shift3_지금", "02-XL_지금", "03-shift3_16단계", "04-XL_16단계", "05-shift3_변환부", "06-XL_변환부",
+        "07-shift3_작곡4B", "08-XL_작곡4B"]
+assert names == [f"Tsuki_피아노_{x}_1m.mp3" for x in want], names
 creq = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:]
-M = [r["model"] for r in creq]
-assert M == ["acestep-v15-turbo-shift3"] + ["acestep-v15-xl-turbo"] * 7 + ["acestep-v15-xl-sft"] * 2, M
-assert len({r["seed"] for r in creq}) == 1 and all(r["audio_duration"] == 60 and r["thinking"] is True for r in creq)
-assert creq[1]["lyrics"].startswith("[Intro") and "lm_cfg_scale" not in creq[1] and "dcw_enabled" not in creq[1]
-assert creq[2]["lyrics"] == "[Instrumental]" and creq[2]["prompt"] == creq[1]["prompt"]
-assert "unaccompanied solo piano" in creq[3]["prompt"] and creq[3]["lyrics"].startswith("[Intro")
-assert creq[4]["lm_cfg_scale"] == 3.5 and creq[4]["lm_temperature"] == 0.7
-assert creq[5]["lyrics"] == "[Instrumental]" and "Only piano" in creq[5]["prompt"] and creq[5]["lm_cfg_scale"] == 3.5
-assert creq[6]["dcw_enabled"] is False and creq[7]["dcw_enabled"] is False and creq[7]["lyrics"] == "[Instrumental]"
-assert creq[8]["inference_steps"] == 50 and creq[8]["guidance_scale"] == 4.0 and creq[9]["guidance_scale"] == 7.0
+assert [r["model"][-8:] for r in creq] == ["o-shift3", "xl-turbo"] * 4, [r["model"] for r in creq]
+assert all("dcw_enabled" not in r for r in creq[0::2]) and all(r["dcw_enabled"] is False for r in creq[1::2])   # shift3 그대로 · XL 은 늘 끔
+assert [r["inference_steps"] for r in creq] == [8, 8, 16, 16, 8, 8, 8, 8]
+assert len({r["seed"] for r in creq}) == 1 and len({r["prompt"] for r in creq}) == 1 and len({r["lyrics"] for r in creq}) == 1
+cs = prompt.compare_cases(True, True)
+assert [c[4] for c in cs] == [{}, {}, {}, {}, prompt.ENV_VAE, prompt.ENV_VAE, prompt.ENV_LM4B, prompt.ENV_LM4B]
+assert all(c[2] == prompt.GEN_MODEL for c in prompt.compare_cases(True, False))       # DCW 못 끄면 XL 은 뺌
+assert prompt.LM_4B in [m for m in ("acestep-5Hz-lm-4B",)]
+e = engine.Engine()
+env1 = e.server_env(prompt.ENV_VAE)
+assert env1["ACESTEP_VAE_CHECKPOINT"] == "scragvae" and "ACESTEP_VAE_CHECKPOINT" not in e.server_env()
+assert e.server_env(prompt.ENV_LM4B)["ACESTEP_LM_MODEL_PATH"] == "acestep-5Hz-lm-4B"
 hw.gpu = real_gpu
 hw._PROFILE = hw.Profile("cpu", "test", False, "", False, 1)
-cs = prompt.compare_cases(jobs.xl_ok(), False)                 # XL 못 씀 · DCW 못 고침 → shift3 로 5곡
-assert len(cs) == 5 and all(c[2] == prompt.GEN_MODEL for c in cs) and cs[0][0] == "01-shift3_지금", cs
+assert [c[0] for c in prompt.compare_cases(jobs.xl_ok(), False)] == ["01-shift3_지금", "02-shift3_16단계", "03-shift3_변환부"]
 hw._PROFILE = None
 print("compare ok", len(names))
 

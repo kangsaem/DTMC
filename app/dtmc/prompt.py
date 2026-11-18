@@ -46,34 +46,31 @@ XL_VRAM = 20                                     # XL 을 쓰는 데 필요한 �
 # 모델: 화면 이름 · 내려받기 크기 GB(대략)
 MODEL_INFO = {MAIN_MODEL: ("기본 모델", 0), GEN_MODEL: ("shift3 모델", 5), XL_TURBO: ("XL 모델", 10),
               XL_SFT: ("XL SFT 모델", 10)}
-LM_STRICT = {"lm_cfg_scale": 3.5, "lm_temperature": 0.7}     # 작곡 담당을 보수적으로(지시문 더 따름 · 무작위 덜)
+LM_4B = "acestep-5Hz-lm-4B"                      # 큰 작곡 담당(멜로디·구성) — 서버를 다시 켜야 바뀜
+MODEL_INFO[LM_4B] = ("작곡 담당 4B", 9)
+ALT_VAE = "scragvae"                             # 대체 음원 변환부(커뮤니티 VAE, MIT) — 서버가 처음 쓸 때 스스로 받음
+ENV_VAE = {"ACESTEP_VAE_CHECKPOINT": ALT_VAE}
+ENV_LM4B = {"ACESTEP_LM_MODEL_PATH": LM_4B}
+XL_OPT = {"dcw_enabled": False}                  # XL 은 늘 DCW 끔(사용자 시험 11/18: 켜면 다른 악기가 새어 나옴)
 
 
 def compare_cases(xl: bool, dcw: bool) -> list:
-    """비교 시험(설정 비교) 목록: (파일 꼬리표, 화면 이름, 모델, request 에 더할 설정).
-    xl = XL 을 쓸 수 있는 컴퓨터(아니면 같은 설정을 shift3 로) · dcw = 엔진이 DCW 값을 받도록 고쳐졌는지."""
-    m = XL_TURBO if xl else GEN_MODEL
-    t = "XL" if xl else "shift3"
-    plain, emph = {"lyrics_plain": True}, {"emphasize": True}
-    allx = {**plain, **emph, **LM_STRICT}
-    cases = []
+    """비교 시험(v0.1.10) 목록: (파일 꼬리표, 화면 이름, 모델, request 에 더할 설정, 서버 환경 변수).
+    기준 둘 = shift3(DCW 켬 그대로) · XL(DCW 끔)에서 하나씩만 바꿈: 16단계 / 대체 음원 변환부 / 작곡 담당 4B.
+    xl = XL 을 쓸 수 있는 컴퓨터 · dcw = 엔진이 DCW 값을 받는지(못 받으면 XL 은 뺌 — XL 은 반드시 DCW 끔).
+    서버를 다시 켜야 하는 것끼리 묶은 순서."""
+    bases = [("shift3", GEN_MODEL, {})]
+    if xl and dcw:
+        bases.append(("XL", XL_TURBO, dict(XL_OPT)))
+    groups = [("지금", "지금 설정", {}, {}), ("16단계", "16단계", {"inference_steps": 16}, {}),
+              ("변환부", "대체 음원 변환부", {}, ENV_VAE)]
     if xl:
-        cases.append(("shift3", "shift3 · 지금 설정(기준)", GEN_MODEL, {}))
-    cases += [
-        (f"{t}_지금", f"{t} · 지금 설정", m, {}),
-        (f"{t}_태그없음", f"{t} · 가사 칸 [Instrumental]만", m, plain),
-        (f"{t}_악기강조", f"{t} · 지시문 악기 반복 강조", m, emph),
-        (f"{t}_작곡보수", f"{t} · 작곡 담당 보수적", m, dict(LM_STRICT)),
-        (f"{t}_셋다", f"{t} · 태그없음 + 강조 + 보수", m, allx),
-    ]
-    if dcw:
-        cases += [(f"{t}_DCW끔", f"{t} · 지금 설정 + DCW 끔", m, {"dcw_enabled": False}),
-                  (f"{t}_셋다_DCW끔", f"{t} · 셋 다 + DCW 끔", m, {**allx, "dcw_enabled": False})]
-    if xl:
-        sft = {**allx, "inference_steps": 50}
-        cases += [("XLSFT_CFG4", "XL SFT · 셋 다 · 엄격도 4", XL_SFT, {**sft, "guidance_scale": 4.0}),
-                  ("XLSFT_CFG7", "XL SFT · 셋 다 · 엄격도 7", XL_SFT, {**sft, "guidance_scale": 7.0})]
-    return [(f"{i + 1:02d}-{tag}", name, model, opt) for i, (tag, name, model, opt) in enumerate(cases)]
+        groups.append(("작곡4B", "작곡 담당 4B", {}, ENV_LM4B))
+    cases = [(f"{t}_{g}", f"{t} · {gname}", m, {**opt, **gopt}, genv)
+             for g, gname, gopt, genv in groups for t, m, opt in bases]
+    order = sorted(range(len(cases)), key=lambda k: (0 if not cases[k][4] else 1 if cases[k][4] is ENV_VAE else 2))
+    return [(f"{n + 1:02d}-{cases[k][0]}",) + cases[k][1:] for n, k in enumerate(order)]
+
 
 LEN_MIN, LEN_MAX = 10, 600
 
