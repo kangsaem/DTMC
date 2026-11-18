@@ -1,0 +1,13 @@
+DTMC — 함께 넣은 소프트웨어와 라이선스
+
+- ACE-Step 1.5 (생성 엔진 소스, engine_src) — MIT 라이선스(ACE-Step-LICENSE.txt). 첫 실행 때 이 소스로
+  Python · PyTorch 등 라이브러리와 ACE-Step 모델을 인터넷에서 받아 설치합니다(각자의 라이선스를 따름).
+  ACE-Step 은 생성한 음악의 상업적 사용을 허용한다고 밝히고 있습니다. 다만 원곡을 참고해 만든 결과물의
+  저작권 문제는 별개이므로, 판매·공개 전에는 원곡과 너무 닮지 않았는지 확인하고 필요하면 전문가 검토를 받으세요.
+- Qt for Python (PySide6) — LGPL v3. 프로그램 폴더의 Qt 라이브러리는 사용자가 바꿔 끼울 수 있습니다.
+  소스: https://code.qt.io/cgit/pyside/pyside-setup.git
+- NumPy — BSD 라이선스.
+- Python — PSF 라이선스.
+- uv (엔진 설치 도구, bin/uv.exe) — MIT 또는 Apache-2.0. https://github.com/astral-sh/uv
+- FFmpeg (bin/ffmpeg.exe · ffprobe.exe) — GPL 빌드. 아래 줄에 버전과 소스 위치를 적습니다.
+  배포할 때는 FFmpeg 소스를 받을 수 있는 곳을 함께 알려야 합니다.

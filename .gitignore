@@ -29,3 +29,13 @@ logs/
 *.log
 .DS_Store
 Thumbs.db
+
+# 개발·빌드
+engine_src/
+engine/
+_user/
+ui_shots/
+dist/
+build/
+*.spec
+tools_bin/

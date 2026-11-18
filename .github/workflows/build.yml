@@ -1,0 +1,192 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ACE_COMMIT: ca1e85fe9430179831e6bc6be790c332190a3866   # app/dtmc/engine.py ACE_COMMIT 과 같게
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path app/dtmc/__init__.py -Pattern '__version__ = "(.+)"').Matches[0].Groups[1].Value
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "DTMC version $v"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: FFmpeg 캐시 불러오기
+        uses: actions/cache/restore@v4
+        with:
+          path: ffmpeg.zip
+          key: ffmpeg-dtmc-none
+          restore-keys: ffmpeg-dtmc-
+
+      # DTME 방식: BtbN 정식 릴리스판(GPL — mp3 lame · vorbis 포함), 장애면 캐시
+      - name: Get FFmpeg
+        id: ffdl
+        shell: pwsh
+        run: |
+          $base = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+          $cands = @("ffmpeg-n8.1-latest-win64-gpl-8.1.zip", "ffmpeg-n8.0-latest-win64-gpl-8.0.zip", "ffmpeg-n7.1-latest-win64-gpl-7.1.zip")
+          $cached = Test-Path ffmpeg.zip
+          $ok = $false
+          for ($i = 1; $i -le 3 -and -not $ok; $i++) {
+            foreach ($c in $cands) {
+              try { Invoke-WebRequest "$base/$c" -OutFile ffmpeg_new.zip -TimeoutSec 300; $ok = $true; Write-Host "ffmpeg: $c"; break }
+              catch { Write-Host "실패 $c ($i): $($_.Exception.Message)" }
+            }
+            if (-not $ok) { Start-Sleep -Seconds 10 }
+          }
+          if ($ok) { Move-Item ffmpeg_new.zip ffmpeg.zip -Force; "fresh=true" >> $env:GITHUB_OUTPUT }
+          elseif ($cached) { Write-Host "다운로드 장애 → 캐시 사용"; "fresh=false" >> $env:GITHUB_OUTPUT }
+          else { throw "ffmpeg 다운로드 실패(캐시도 없음)" }
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_x
+          $bin = Get-ChildItem ffmpeg_x -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force tools_bin | Out-Null
+          Copy-Item $bin.FullName tools_bin/
+          Copy-Item (Join-Path $bin.DirectoryName "ffprobe.exe") tools_bin/
+          & tools_bin/ffmpeg.exe -hide_banner -version | Select-Object -First 1
+
+      - name: FFmpeg 캐시 바꾸기
+        if: steps.ffdl.outputs.fresh == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ffmpeg.zip
+          key: ffmpeg-dtmc-${{ github.run_id }}
+
+      - name: Get uv (엔진 설치 도구)
+        shell: pwsh
+        run: |
+          $ok = $false
+          foreach ($i in 1..3) {
+            try { Invoke-WebRequest "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip" -OutFile uv.zip -TimeoutSec 300; $ok = $true; break }
+            catch { Write-Host "uv 받기 실패 ${i}: $_"; Start-Sleep -Seconds 10 }
+          }
+          if (-not $ok) { throw "uv 다운로드 실패" }
+          Expand-Archive uv.zip -DestinationPath uv_x
+          Copy-Item (Get-ChildItem uv_x -Recurse -Filter uv.exe | Select-Object -First 1).FullName tools_bin/
+          & tools_bin/uv.exe --version
+
+      - name: Get ACE-Step source (고정 버전)
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none https://github.com/ACE-Step/ACE-Step-1.5 ace_src
+          git -C ace_src checkout $env:ACE_COMMIT
+          if ($LASTEXITCODE -ne 0) { throw "ACE-Step $env:ACE_COMMIT 체크아웃 실패" }
+          Remove-Item -Recurse -Force ace_src/.git
+          New-Item -ItemType Directory -Force engine_src | Out-Null
+          Move-Item ace_src engine_src/ACE-Step-1.5
+          if (-not (Test-Path engine_src/ACE-Step-1.5/uv.lock)) { throw "uv.lock 없음" }
+          # uv.lock 이 지금 pyproject 와 맞는지(설치 때 --frozen 으로 그대로 씀)
+          Push-Location engine_src/ACE-Step-1.5
+          & ../../tools_bin/uv.exe lock --check
+          $lc = $LASTEXITCODE
+          Pop-Location
+          if ($lc -ne 0) { Write-Output "::warning::uv lock --check 실패($lc) — 설치는 --frozen(잠금 파일 그대로)으로 진행" }
+
+      - name: Tests (분석 · 가짜 엔진 생성 · 화면)
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD/tools_bin;$env:PATH"
+          $env:PYTHONIOENCODING = "utf-8"
+          $env:PYTHONUNBUFFERED = "1"
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $o = python -X faulthandler tests/test_pipeline.py 2>&1 | Out-String
+          Write-Output $o
+          if ($o -notmatch "OK test_pipeline") { exit 1 }
+          $global:LASTEXITCODE = 0
+          $o = python -X faulthandler tests/test_ui_smoke.py 2>&1 | Out-String
+          Write-Output $o
+          if ($o -notmatch "OK test_ui_smoke") { exit 1 }
+          $global:LASTEXITCODE = 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-shots
+          path: ui_shots
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Build exe (PyInstaller, onedir)
+        run: |
+          pyinstaller --noconfirm --windowed --name DTMC --icon assets/dtmc.ico --paths app `
+            --collect-submodules dtmc `
+            --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets `
+            --exclude-module PySide6.QtQuick --exclude-module PySide6.QtQml --exclude-module PySide6.Qt3DCore `
+            --exclude-module tkinter `
+            app/main.py
+
+      - name: 폴더 꾸리기(bin · assets · engine_src · 라이선스)
+        shell: pwsh
+        run: |
+          $d = "dist/DTMC"
+          New-Item -ItemType Directory -Force "$d/bin" | Out-Null
+          Copy-Item tools_bin/* "$d/bin/"
+          Copy-Item assets $d -Recurse -Force
+          Copy-Item engine_src $d -Recurse -Force
+          Copy-Item README.md "$d/사용법.md"
+          New-Item -ItemType Directory -Force "$d/LICENSES" | Out-Null
+          Copy-Item engine_src/ACE-Step-1.5/LICENSE "$d/LICENSES/ACE-Step-LICENSE.txt"
+          Copy-Item LICENSES/NOTICE.txt "$d/LICENSES/"
+          $ffv = (& tools_bin/ffmpeg.exe -hide_banner -version | Select-Object -First 1)
+          Add-Content "$d/LICENSES/NOTICE.txt" "`r`n동봉한 FFmpeg: $ffv (BtbN/FFmpeg-Builds, GPL 빌드) — 소스: https://github.com/BtbN/FFmpeg-Builds , https://ffmpeg.org"
+
+      - name: Smoke test (exe 실행)
+        shell: pwsh
+        run: |
+          $env:DTMC_SELFTEST = "1"
+          $env:DTMC_JOB = "0"
+          $env:DTMC_USER_DIR = "$PWD/selftest_user"
+          $p = Start-Process dist/DTMC/DTMC.exe -Wait -PassThru
+          Write-Host "exit code: $($p.ExitCode)"
+          Get-Content selftest_user/logs/dtmc.log -ErrorAction SilentlyContinue | Select-Object -Last 20
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - name: Size report
+        shell: pwsh
+        run: |
+          $root = (Resolve-Path dist/DTMC).Path
+          $all = Get-ChildItem $root -Recurse -File
+          "TOTAL {0:N1} MB  files {1}" -f (($all | Measure-Object Length -Sum).Sum / 1MB), $all.Count | Write-Host
+          $all | Sort-Object Length -Descending | Select-Object -First 15 |
+            ForEach-Object { "{0,8:N1} MB  {1}" -f ($_.Length / 1MB), $_.FullName.Substring($root.Length + 1) } | Write-Host
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DTMC-${{ steps.ver.outputs.version }}-windows
+          path: dist/DTMC
+          retention-days: 30
+
+      - name: Zip for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: Compress-Archive -Path dist/DTMC -DestinationPath DTMC-${{ steps.ver.outputs.version }}-windows.zip
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: DTMC-${{ steps.ver.outputs.version }}-windows.zip
