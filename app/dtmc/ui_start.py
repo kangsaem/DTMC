@@ -1,13 +1,14 @@
-"""시작 창(DTME 시작 창 틀 그대로): 제목 표시줄·테두리 없는 400×560, 위 = 정사각형 그림(assets/start.png)
+"""시작 창(DTME 시작 창 틀 그대로): 제목 표시줄·테두리 없는 400×560, 위 = 정사각형 영상(assets/start.mp4, v0.1.15:
+소리 없이 한 번 재생 → 마지막 장면에서 멈춤 · 재생 전 = start_poster.jpg · 영상을 못 쓰면 start.png)
 + 왼쪽 위 'DTMC'·버전 + 오른쪽 위 ✕(종료) + 오른쪽 아래 세로 글자, 아래(#262626) = [AUTO] 160×48. 빈 곳을 끌어 옮김.
 [AUTO] = 빈 작업 창 · 원곡을 끌어다 놓기 = 그 파일이 들어간 작업 창. 작업 창 [취소] = 이 창으로."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from . import __version__, paths, ui_style
+from . import __version__, log, paths, ui_style
 
 IMG = 400
 W, H = IMG, IMG + 160
@@ -54,14 +55,14 @@ class StartWindow(QWidget):
         self.img = QLabel(self)
         self.img.setFixedSize(IMG, IMG)
         self.img.setAlignment(Qt.AlignCenter)
-        pm = QPixmap(str(paths.asset("start.png")))
+        self.player = self.sink = None
+        video = paths.asset("start.mp4")
+        poster = paths.asset("start_poster.jpg")
+        pm = self._show(QPixmap(str(poster))) if video.is_file() else QPixmap()
+        if pm.isNull() or not self._play(video):
+            pm = self._show(QPixmap(str(paths.asset("start.png"))))
         if pm.isNull():
             self.img.setStyleSheet("background:#3a3a3a;")
-        else:
-            dpr = self.devicePixelRatioF() or 1.0
-            pm = pm.scaled(round(IMG * dpr), round(IMG * dpr), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-            pm.setDevicePixelRatio(dpr)
-            self.img.setPixmap(pm)
         if not pm.isNull():                    # 제목 뒤 어두운 그라데이션(밝은 그림에서도 흰 글자가 보이게, MOSCO v0.7.92 방식)
             grad = QWidget(self.img)
             grad.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -118,6 +119,42 @@ class StartWindow(QWidget):
         v.addWidget(self.b_auto, 0, Qt.AlignHCenter)
         v.addStretch(1)
 
+    def _show(self, pm: QPixmap) -> QPixmap:
+        """그림(또는 영상 한 장면)을 400×400 칸에 꽉 차게."""
+        if pm.isNull():
+            return pm
+        dpr = self.devicePixelRatioF() or 1.0
+        pm = pm.scaled(round(IMG * dpr), round(IMG * dpr), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        pm.setDevicePixelRatio(dpr)
+        self.img.setPixmap(pm)
+        return pm
+
+    def _play(self, video) -> bool:
+        """영상을 소리 없이 한 번 재생(장면마다 그림 칸에 그림 → 겹친 제목·그라데이션·✕ 가 그대로 위에 보임).
+        끝나면 마지막 장면이 그대로 남음. 못 쓰면 False(→ 그림)."""
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer, QVideoSink
+            self.player = QMediaPlayer(self)                 # 소리 출력(QAudioOutput)을 안 붙임 = 소리 없음
+            self.sink = QVideoSink(self)
+            self.player.setVideoSink(self.sink)
+            self.sink.videoFrameChanged.connect(self._frame)
+            self.player.errorOccurred.connect(lambda _e, msg="": log.log.warning("시작 영상 재생 실패: %s", msg))
+            self.player.setSource(QUrl.fromLocalFile(str(video)))
+            self.player.play()
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.log.warning("시작 영상 못 씀(그림으로): %s", e)
+            self.player = self.sink = None
+            return False
+
+    def _frame(self, f):
+        try:
+            im = f.toImage()
+        except Exception:  # noqa: BLE001
+            return
+        if not im.isNull():
+            self._show(QPixmap.fromImage(im))
+
     def _style(self, hot):
         self.setStyleSheet("#Start{background:#262626; border:none;}" if not hot else
                            "#Start{background:#262a30; border:2px dashed #4a8fe0;}")
@@ -153,6 +190,13 @@ class StartWindow(QWidget):
         self._style(False)
         self.open_work([u.toLocalFile() for u in e.mimeData().urls()])
 
+    def hideEvent(self, e):
+        if self.player is not None:                           # 작업 창으로 넘어가면 멈춤(마지막 장면 유지)
+            self.player.pause()
+        super().hideEvent(e)
+
     def closeEvent(self, e):
+        if self.player is not None:
+            self.player.stop()
         e.accept()
         QApplication.instance().quit()
