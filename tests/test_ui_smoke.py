@@ -64,32 +64,50 @@ dlg.show()
 shot(dlg, "02_engine_dialog.png")
 dlg.close()
 
-a.open_work([str(a1), str(a2)])
+# 원곡 없이도 설정 화면 · [AUTO] 가능
+a.open_work([])
 w = a.work
+pump(0.3)
+assert w.size().width() == 1400 and w.size().height() == 720, w.size()
+assert all(sr.body.isVisible() for sr in w.stages.values())               # 세 단계 늘 다 펼침(DTME v0.17.2 틀)
+assert w.b_start.isEnabled() and "원곡 없이" in w.sum.text() and not w.len_mode.isEnabled()
+assert w.plan().length_mode == "set" and w.plan().style == "chill"
+shot(w, "03_work_empty.png")
+
+a.open_work([str(a1), str(a2)])
 for _ in range(200):
     pump(0.05)
     if all(s.analysis is not None for s in w.sources):
         break
 assert all(s.analysis is not None for s in w.sources), [s.error for s in w.sources]
 assert 90 < w.sources[0].analysis.bpm < 102, w.sources[0].analysis.bpm
-w.instr.set_value(["piano", "strings"])
+assert len(w.style.btns) == 12 and not hasattr(w, "instr") and not hasattr(w, "quality")
 w.cand.set_value("2")
 w._sync()
-shot(w, "03_work_generate.png")
-assert w.quality.isHidden() and w.plan().quality == "std"                 # XL 못 쓰는 컴퓨터 = 품질 선택 없음
-assert not hasattr(w, "slider")                                           # 원곡 반영 슬라이더 삭제
-w._open_stage("analyze")
-assert w.bpm_mode.isEnabled()                                             # 템포 잠금 없음
+assert w.len_mode.isEnabled() and w.cap.toPlainText().startswith("Chillout") and "자동" in w.cap_note.text()
+shot(w, "04_work_setup.png")
+# 스타일 고르기 = 하나만 · 지시문 자동 채움
+w.style.btns["jazz"].click()
+assert w.style_key() == "jazz" and w.cap.toPlainText().startswith("Jazz trio") and w.plan().caption == ""
+# 지시문 직접 고침 → 표시 · 되돌리기
+w.cap.setPlainText(w.cap.toPlainText() + " Slow sea turtle gliding over coral.")
+pump(0.1)
+assert w.plan().caption.endswith("coral.") and "직접 고침" in w.cap_note.text() and w.b_reset.isEnabled()
 w.bpm_mode.set_value("set")
+w.feel.set_value("on")
 w._sync()
-assert w.bpm.isEnabled()
-shot(w, "04_work_analyze.png")
+assert w.bpm.isEnabled() and w.plan().src_feel and "원곡 느낌" in w.ref_lab.text()
+shot(w, "05_work_custom.png")
+w.b_reset.click()
+assert w.plan().caption == "" and w.cap.toPlainText().startswith("Jazz trio")
 w.bpm_mode.set_value("src")
+w.feel.set_value("off")
+w.stages["analyze"].set_on(False)                                         # 분석 끔 = 원곡 안 씀
 w._sync()
-w._open_stage("output")
-assert "봄날의" in w.title.placeholderText(), w.title.placeholderText()
-shot(w, "05_work_output.png")
-w._open_stage("generate")
+assert not w.len_mode.isEnabled() and w.plan().length_mode == "set"
+w.stages["analyze"].set_on(True)
+w.style.btns["chill"].click()
+w._sync()
 
 # 실행(가짜 엔진)
 os.environ["DTMC_ENGINE_URL"] = url
@@ -110,9 +128,8 @@ from dtmc.ui_main import ResultRow  # noqa: E402
 rows = w.findChildren(ResultRow)
 assert len(rows) == 4, len(rows)
 for r in rows:
-    assert Path(r.path).exists()
+    assert Path(r.path).exists() and "칠아웃" in Path(r.path).name, r.path
     assert not r.b_src.isHidden() and r.src_path          # (방금 넣은 줄은 아직 안 그려졌을 수 있어 isVisible 대신)
-
 shot(w, "07_work_done.png")
 assert w.b_cancel.isVisible() and w.b_cancel.text() == "폴더 열기" and w.b_start.text() == "돌아가기"
 w.back_to_setup()
@@ -120,20 +137,9 @@ assert w.mode == "setup" and w.b_start.text() == "AUTO"
 assert w.b_start.isVisible() and not w.b_cancel.isVisible()      # 설정 화면 = [AUTO]만
 assert w.b_close.isVisible()                                      # 오른쪽 위 [✕]
 
-# 음색 참고 2개 + 비교 시험(모델 비교, 가짜 엔진) → 결과 3줄(기본 / shift3 / XL)
-from dtmc import hw  # noqa: E402
-
-hw.gpu = lambda: hw.Gpu("시험 GPU", 24.0, "999.0")
-hw._PROFILE = hw.Profile("gpu", "GPU · 시험", True, "acestep-5Hz-lm-1.7B", True, 2)
+# 스타일 샘플(가짜 엔진) → 12줄
 w._set_refs([str(a2), str(a1)])
 assert "Night Drive" in w.ref_lab.text() and "외 1개" in w.ref_lab.text()
-assert "10가지" in w.cmp_hint.text(), w.cmp_hint.text()
-w._sync()
-assert not w.quality.isHidden()                                           # 큰 GPU = 품질 선택 보임
-w.quality.set_value("hq")
-w._sync()
-assert w.plan().quality == "hq"
-shot(w, "03c_work_generate_ref.png")
 w.start_compare()
 for _ in range(1500):
     pump(0.05)
@@ -145,8 +151,8 @@ from PySide6.QtCore import QEvent  # noqa: E402
 app.sendPostedEvents(None, QEvent.DeferredDelete)      # 지난 결과 줄(deleteLater) 정리
 rows = w.findChildren(ResultRow)
 names = sorted(Path(r.path).name for r in rows)
-assert len(names) == 10 and names[0] == "봄날의_01-수중 앰비언트_1m.mp3", names
-shot(w, "08_compare_done.png")
+assert len(names) == 12 and names[0] == "봄날의_01-수중 앰비언트_1m.mp3" and "12-하드록" in names[-1], names
+shot(w, "08_samples_done.png")
 w.back_to_setup()
 print("OK test_ui_smoke")
 os._exit(0)

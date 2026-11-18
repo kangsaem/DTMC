@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPlainTextEdit,
                                QListWidgetItem, QMenu, QScrollArea, QSizePolicy, QSpinBox, QStyle,
                                QStyledItemDelegate, QVBoxLayout, QWidget)
 
@@ -18,7 +18,8 @@ from .ui_widgets import (CHK_BG, SUB, SUB_TXT, WARN, Busy, DragMove, Grip, Multi
                          labeled, main_button, no_hfw, open_folder, small_button)
 
 L = log.log
-EMPTY_HINT = ("원곡(음원 파일) · 폴더를 여기에 끌어다 놓기", "우클릭 = 파일 추가 · 폴더 추가")
+EMPTY_HINT = ("원곡(음원 파일) · 폴더를 여기에 끌어다 놓기 — 없어도 만들 수 있음", "우클릭 = 파일 추가 · 폴더 추가")
+COL_W = 470                    # 설정 한 줄 폭(DTME v0.17.2 자동 창과 같게 — 창 1400×720, 두 줄 다 펼침)
 AUDIO_FILTER = "음원 (" + " ".join(f"*{e} *{e.upper()}" for e in sorted(ff.AUDIO_EXT)) + ")"
 ROLE = Qt.UserRole + 1
 
@@ -323,9 +324,7 @@ class WorkWindow(DragMove, QWidget):
             "generate": StageRow("generate", self._generate_body(), fixed=True),
             "output": StageRow("output", self._output_body(), fixed=True),
         }
-        for sr in self.stages.values():
-            sr.toggled.connect(lambda _k, _v: self._mood_mode())
-            sr.clicked.connect(self._open_stage)
+        self.stages["analyze"].toggled.connect(lambda _k, _v: self._sync())
         right = QVBoxLayout()
         right.setSpacing(8)
         right.setContentsMargins(0, 0, 0, 0)
@@ -333,17 +332,19 @@ class WorkWindow(DragMove, QWidget):
         right.addWidget(self.warn_lab)
         right.addWidget(self.sum)
         right.addStretch(1)
-        for k in ("analyze", "generate", "output"):
-            right.addWidget(self.stages[k])
-        self.rw_in = Panel()
-        self.rw_in.setLayout(right)
-        self.rw = QScrollArea()                   # 단계 줄을 펼쳐 칸보다 길어지면 스크롤(창 크기는 그대로)
-        self.rw.setWidgetResizable(True)
-        self.rw.setWidget(self.rw_in)
-        self.rw.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.rw.setFrameShape(QScrollArea.NoFrame)
-        self.rw.setStyleSheet("QScrollArea{background:transparent;} QScrollArea > QWidget > QWidget{background:transparent;}")
-        self.rw.setFixedWidth(470)
+        two = QHBoxLayout()                       # DTME v0.17.2 B안과 같은 틀: 두 줄, 늘 다 펼침
+        two.setSpacing(10)
+        for keys in (("analyze", "output"), ("generate",)):
+            col = QVBoxLayout()
+            col.setSpacing(8)
+            for k in keys:
+                col.addWidget(self.stages[k])
+            col.addStretch(1)
+            two.addLayout(col, 1)
+        right.addLayout(two)
+        self.rw = Panel()
+        self.rw.setLayout(right)
+        self.rw.setFixedWidth(COL_W * 2 + 10)
         # ---- 작업 중: 결과 줄 · 글자 · 막대
         self.res_box = QVBoxLayout()
         self.res_box.setContentsMargins(0, 0, 0, 0)
@@ -368,7 +369,7 @@ class WorkWindow(DragMove, QWidget):
         runl.addWidget(self.step_bar)
         self.run_w = Panel()
         self.run_w.setLayout(runl)
-        self.run_w.setFixedWidth(470)
+        self.run_w.setFixedWidth(COL_W * 2 + 10)
         self.run_w.setVisible(False)
         mid = QHBoxLayout()
         mid.setSpacing(16)
@@ -402,7 +403,7 @@ class WorkWindow(DragMove, QWidget):
         lay.addLayout(top)
         lay.addLayout(mid, 1)
         lay.addLayout(bot)
-        self.resize(1040, 720)
+        self.resize(1400, 720)
 
     def _body(self, rows) -> QWidget:
         w = QWidget()
@@ -422,14 +423,11 @@ class WorkWindow(DragMove, QWidget):
         return no_hfw(h, 2)
 
     def _analyze_body(self) -> QWidget:
-        self.a_info = no_hfw(QLabel("원곡을 넣으면 템포 · 조성 · 분위기를 자동으로 찾습니다."), 3)
+        """원곡에서 가져올 것: 조성 · 템포(자동일 때) · 느낌(켰을 때만). 단계를 끄면 원곡을 쓰지 않음."""
+        self.a_info = no_hfw(QLabel(""), 3)
         self.a_info.setStyleSheet(f"color:{SUB};")
-        self.mood_mode = Seg([("auto", "원곡대로"), ("set", "직접 고르기")], "auto")
-        self.mood_mode.changed.connect(self._mood_mode)
-        self.moods = Multi([(k, ko) for k, ko, _ in prompt.MOODS], ["calm"], limit=prompt.MAX_MOODS, cols=4, min_one=True)
-        self.moods.changed.connect(self._moods_changed)
-        self.manual_moods = ["calm"]
-        self.bpm_mode = Seg([("src", "원곡 템포"), ("set", "직접")], "src")
+        self.bpm_mode = Seg([("src", "자동"), ("set", "직접")], "src")
+        self.bpm_mode.setToolTip("자동 = 원곡 템포가 스타일에 어울리면 그 템포, 아니면 엔진이 정함 · 직접 = 정한 숫자대로")
         self.bpm_mode.changed.connect(lambda _k: self._sync())
         self.bpm = QSpinBox()
         self.bpm.setRange(40, 200)
@@ -441,16 +439,32 @@ class WorkWindow(DragMove, QWidget):
         brow.setSpacing(6)
         brow.addWidget(self.bpm_mode, 1)
         brow.addWidget(self.bpm)
-        return self._body([self.a_info, labeled("분위기", self.mood_mode), labeled("", self.moods),
-                           labeled("템포", brow),
-                           self._hint("원곡에서는 템포·조성·분위기만 읽습니다(원곡 소리는 쓰지 않음). 분위기는 2개까지. "
-                                      "끄면 고른 악기·분위기만으로 만듭니다.")])
+        self.feel = Seg([("off", "안 씀"), ("on", "원곡 느낌 참고")], "off")
+        self.feel.setToolTip("원곡 소리에서 음색·분위기만 참고합니다(멜로디는 따라가지 않음). "
+                             "켜면 '음색 참고' 칸 대신 원곡을 씁니다. 공개·판매용이면 원곡과 너무 닮지 않았는지 확인하세요.")
+        self.feel.changed.connect(lambda _k: self._sync())
+        return self._body([self.a_info, labeled("템포", brow), labeled("원곡 소리", self.feel),
+                           self._hint("원곡은 없어도 됩니다. 넣으면 조성 · 템포 · 길이를 가져옵니다. "
+                                      "이 단계를 끄면 원곡을 쓰지 않습니다.")])
 
     def _generate_body(self) -> QWidget:
-        self.instr = Multi([(k, ko) for k, ko, _ in prompt.INSTRUMENTS], ["piano"], limit=prompt.MAX_INSTR, cols=4)
-        self.instr.changed.connect(lambda _v: self._sync())
-        self.instr_note = self._hint("최대 3개까지 함께 쓸 수 있습니다.")
-        self.instr.refused.connect(self._instr_refused)
+        self.style = Multi([(k, ko) for k, ko, _c, _r in prompt.STYLES], [prompt.DEFAULT_STYLE], limit=1, cols=4)
+        self.style.set_swap(True)
+        self.style.changed.connect(self._style_changed)
+        self.cap = QPlainTextEdit()
+        self.cap.setFixedHeight(92)
+        self.cap.setTabChangesFocus(True)
+        self.cap.setStyleSheet("QPlainTextEdit{background:#1e1e1e; border:1px solid #3a3a3a; border-radius:3px; color:#d8d8d8;}")
+        self.cap.setToolTip("엔진에 보낼 지시문(영어). 스타일을 고르면 자동으로 채워지고, 직접 고쳐 쓸 수 있습니다.")
+        self.cap.textChanged.connect(lambda: self._sync())
+        self.cap_note = QLabel("")
+        b_reset = small_button("되돌리기", 68, 24, "고른 스타일의 지시문으로 되돌리기")
+        b_reset.clicked.connect(lambda: self._set_caption(""))
+        self.b_reset = b_reset
+        crow = QHBoxLayout()
+        crow.setSpacing(6)
+        crow.addWidget(self.cap_note, 1)
+        crow.addWidget(b_reset)
         self.len_mode = Seg([("src", "원곡 길이"), ("set", "직접")], "src")
         self.len_mode.changed.connect(lambda _k: self._sync())
         self.secs = QSpinBox()
@@ -470,27 +484,12 @@ class WorkWindow(DragMove, QWidget):
         lrow.addWidget(self.secs_lab)
         self.cand = Seg([(str(i), f"{i}곡") for i in (1, 2, 3, 4)], str(hw.profile().candidates))
         self.cand.changed.connect(lambda _k: self._sync())
-        self.quality = Seg(prompt.QUALITIES, "std")
-        self.quality.changed.connect(lambda _k: self._sync())
-        self._q_row = labeled("품질", self.quality)
-        self.quality.setToolTip("기본 = 가볍고 선명 · 고품질 = 음색이 풍부(더 느림). 바꾸면 엔진을 다시 켭니다.")
-        self.b_test = small_button("악기 시험", 88, 28, "8개 악기를 20초씩 만들어 음질을 비교(원곡 필요 없음)")
-        self.b_test.clicked.connect(self.start_test)
-        self.b_cmp = small_button("비교 시험", 88, 28,
-                                  f"배경음악 스타일 {len(prompt.STYLES)}가지를 {prompt.COMPARE_SECONDS}초씩(고른 품질 · 같은 씨앗)")
-        self.b_cmp.clicked.connect(self.start_compare)
-        trow = QHBoxLayout()
-        trow.setSpacing(8)
-        trow.addWidget(self.b_test)
-        trow.addWidget(self.b_cmp)
-        self.cmp_hint = self._hint("")
-        trow.addWidget(self.cmp_hint, 1)
         self.refs: list[str] = []
         self.ref_lab = QLabel("")
         self.ref_lab.setStyleSheet(f"color:{SUB};")
         self.ref_lab.setMinimumWidth(1)
         self.ref_lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        b_ref = small_button("선택", 52, 26, f"잘 녹음된 실제 악기 연주 파일(최대 {prompt.MAX_REFS}개) — 음색·연주 느낌만 참고")
+        b_ref = small_button("선택", 52, 26, f"잘 녹음된 실제 연주 파일(최대 {prompt.MAX_REFS}개) — 음색·연주 느낌만 참고")
         b_ref.clicked.connect(self.pick_ref)
         b_refx = small_button("지움", 52)
         b_refx.clicked.connect(lambda: self._set_refs([]))
@@ -499,10 +498,15 @@ class WorkWindow(DragMove, QWidget):
         rrow.addWidget(self.ref_lab, 1)
         rrow.addWidget(b_ref)
         rrow.addWidget(b_refx)
-        self._ref_row = labeled("음색 참고", rrow)
-        self.ref_lab.setToolTip("선택 사항 · 같은 악기(같은 편성)의 실제 연주 녹음만 넣으세요. 비우면 쓰지 않습니다.")
-        return self._body([labeled("악기", self.instr), labeled("", self.instr_note), labeled("길이", lrow),
-                           labeled("후보", self.cand), self._q_row, self._ref_row, trow])
+        self.b_cmp = small_button("스타일 샘플", 96, 28,
+                                  f"스타일 {len(prompt.STYLES)}가지를 {prompt.COMPARE_SECONDS}초씩 뽑아 들어 보기(같은 씨앗)")
+        self.b_cmp.clicked.connect(self.start_compare)
+        trow = QHBoxLayout()
+        trow.setSpacing(8)
+        trow.addWidget(self.b_cmp)
+        trow.addWidget(self._hint(f"스타일 {len(prompt.STYLES)}가지를 {prompt.COMPARE_SECONDS}초씩 뽑아 들어 봅니다."), 1)
+        return self._body([labeled("스타일", self.style), labeled("지시문", self.cap), labeled("", crow),
+                           labeled("길이", lrow), labeled("후보", self.cand), labeled("음색 참고", rrow), trow])
 
     def _output_body(self) -> QWidget:
         self.fmt = Seg(ff.FORMAT_NAMES, "mp3")
@@ -525,49 +529,61 @@ class WorkWindow(DragMove, QWidget):
         self.title.setMaxLength(60)
         self.title.textChanged.connect(lambda _t: self._sync())
         return self._body([labeled("제목", self.title), labeled("형식", self.fmt), labeled("저장 폴더", orow),
-                           self._hint("파일 이름 = 제목_악기_번호_길이(예: Tsuki_피아노_1_1m30s.mp3). 제목을 비우면 "
+                           self._hint("파일 이름 = 제목_스타일_번호_길이(예: Dive_칠아웃_1_1m30s.mp3). 제목을 비우면 "
                                       "원곡 이름 첫 단어. 같은 이름이 있으면 (2)를 붙입니다.")])
 
     # ================================================================ 설정 기억
     def _load_cfg(self):
         c = self.cfg
         self.stages["analyze"].set_on(c.get("analyze_on", True))
-        self.mood_mode.set_value(c.get("mood_mode", "auto"))
-        self.manual_moods = list(c.get("moods", ["calm"]) or ["calm"])
         self.bpm_mode.set_value(c.get("bpm_mode", "src"))
         self.bpm.setValue(int(c.get("bpm", 90)))
-        self.instr.set_value(c.get("instruments", ["piano"]) or ["piano"])
+        self.feel.set_value("on" if c.get("src_feel") else "off")
+        st = c.get("style", prompt.DEFAULT_STYLE)
+        self.style.set_value([st if st in prompt.STYLE_BY else prompt.DEFAULT_STYLE])
+        self._set_caption(c.get("caption", "") or "")
         self.len_mode.set_value(c.get("length_mode", "src"))
         self.secs.setValue(int(c.get("seconds", 60)))
         self.cand.set_value(str(c.get("candidates", hw.profile().candidates)))
-        self.quality.set_value(c.get("quality", "std") if jobs.xl_ok() else "std")
         self.fmt.set_value(c.get("fmt", "mp3"))
         self.out_dir = c.get("out_dir", "")
         self.refs = [f for f in (c.get("refs") or []) if f and Path(f).is_file()][: prompt.MAX_REFS]
-        self._mood_mode()
-        op = c.get("open", "generate")
-        if op in self.stages:
-            self.stages[op].set_open(True)
 
     def _save_cfg(self):
         p = self.plan()
         settings.put("work", {
-            "analyze_on": p.analyze_on, "mood_mode": self.mood_mode.value(), "moods": self.manual_moods,
-            "bpm_mode": p.bpm_mode, "bpm": p.bpm, "instruments": p.instruments, "length_mode": p.length_mode,
-            "seconds": p.seconds, "candidates": p.candidates, "fmt": p.fmt,
-            "out_dir": self.out_dir, "refs": self.refs, "quality": p.quality,
-            "open": next((k for k, s in self.stages.items() if s.open_), ""),
+            "analyze_on": p.analyze_on, "bpm_mode": self.bpm_mode.value(), "bpm": p.bpm, "src_feel": p.src_feel,
+            "style": p.style, "caption": p.caption, "length_mode": self.len_mode.value(), "seconds": p.seconds,
+            "candidates": p.candidates, "fmt": p.fmt, "out_dir": self.out_dir, "refs": self.refs,
         })
+
+    def style_key(self) -> str:
+        return (self.style.value() or [prompt.DEFAULT_STYLE])[0]
+
+    def _custom(self) -> str:
+        """직접 고친 지시문(스타일 지시문과 다를 때만), 아니면 빈 글."""
+        t = " ".join(self.cap.toPlainText().split())
+        return "" if not t or t == prompt.style_caption(self.style_key()) else t
+
+    def _set_caption(self, text: str):
+        """지시문 칸 채우기: text 가 비면 고른 스타일의 지시문."""
+        self.cap.blockSignals(True)
+        self.cap.setPlainText(text or prompt.style_caption(self.style_key()))
+        self.cap.blockSignals(False)
+        if hasattr(self, "sum"):
+            self._sync()
+
+    def _style_changed(self, _v):
+        self._set_caption("")                     # 스타일을 바꾸면 그 스타일의 지시문으로(직접 고친 것은 버림)
 
     def plan(self) -> jobs.Plan:
         an = self.stages["analyze"].on
-        moods = list(self.manual_moods) if (self.mood_mode.value() == "set" or not an) else []
-        return jobs.Plan(analyze_on=an, moods=moods, bpm_mode=self.bpm_mode.value() if an else "set",
-                         bpm=self.bpm.value(), instruments=self.instr.value() or ["piano"],
-                         length_mode=self.len_mode.value(), seconds=self.secs.value(),
+        has = bool(self.checked())
+        return jobs.Plan(analyze_on=an, bpm_mode=self.bpm_mode.value(), bpm=self.bpm.value(),
+                         length_mode=self.len_mode.value() if (an and has) else "set", seconds=self.secs.value(),
                          candidates=int(self.cand.value()), fmt=self.fmt.value(), out_dir=self.out_dir,
-                         title=self.title.text().strip(), refs=list(self.refs),
-                         quality=self.quality.value() if jobs.xl_ok() else "std")
+                         title=self.title.text().strip(), refs=list(self.refs), style=self.style_key(),
+                         caption=self._custom(), src_feel=self.feel.value() == "on")
 
     def _out_dir(self) -> Path:
         return Path(self.out_dir) if self.out_dir else paths.default_out_dir()
@@ -589,32 +605,9 @@ class WorkWindow(DragMove, QWidget):
             self._sync()
 
     # ================================================================ 상태 반영
-    def _open_stage(self, key):
-        for k, sr in self.stages.items():
-            sr.set_open(k == key and not sr.open_)
-        self._save_cfg()
-
-    def _mood_mode(self, _k=None):
-        """원곡대로 = 고른 원곡의 자동 분위기를 보여 줌(누를 수 없음) · 직접 = 내가 고른 것."""
-        if self.mood_mode.value() == "set" or not self.stages["analyze"].on:
-            self.moods.set_value(self.manual_moods)
-        else:
-            s = self._current()
-            self.moods.set_value(s.analysis.moods if s is not None and s.analysis is not None else [])
-        self._sync()
-
-    def _moods_changed(self, v):
-        if self.mood_mode.value() == "set" or not self.stages["analyze"].on:
-            self.manual_moods = list(v) or ["calm"]
-        self._sync()
-
     def _current(self):
         it = self.list.currentItem()
         return it.data(ROLE) if it is not None else (self.sources[0] if self.sources else None)
-
-    def _instr_refused(self):
-        self.instr_note.setStyleSheet(f"color:{WARN}; font-size:11px;")
-        QTimer.singleShot(1500, lambda: self.instr_note.setStyleSheet(f"color:{SUB_TXT}; font-size:11px;"))
 
     def checked(self) -> list[jobs.Source]:
         return [s for s in self.sources if s.checked and not s.error]
@@ -622,45 +615,42 @@ class WorkWindow(DragMove, QWidget):
     def _sync(self):
         p = self.plan()
         an = self.stages["analyze"]
-        self.moods.set_enabled_all(self.mood_mode.value() == "set" or not an.on)
-        self.bpm_mode.setEnabled(an.on)
-        self.bpm.setEnabled(self.bpm_mode.value() == "set" or not an.on)
+        cs = self.checked()
+        use_src = an.on and bool(cs)
+        st = prompt.STYLE_BY[p.style]
+        self.bpm.setEnabled(self.bpm_mode.value() == "set")
+        self.len_mode.setEnabled(use_src)                       # 원곡이 없거나 안 쓰면 길이는 직접
         self.secs.setEnabled(p.length_mode == "set")
         self.secs_lab.setText(mmss(self.secs.value()))
-        mood_txt = ("분위기 자동" if not p.moods else " · ".join(prompt.MOOD[m][0] for m in p.moods))
-        an.set_summary(f"{mood_txt} · " + ("원곡 템포" if p.bpm_mode == "src" else f"{p.bpm} BPM"))
+        an.set_summary(("템포 자동" if p.bpm_mode == "src" else f"{p.bpm} BPM")
+                       + (" · 원곡 느낌 참고" if p.src_feel else "") if cs else "원곡 없음 — 스타일만으로")
         len_txt = "원곡 길이" if p.length_mode == "src" else mmss(p.seconds)
-        self.stages["generate"].set_summary(f"{prompt.instr_label(p.instruments)} · {len_txt} · 후보 {p.candidates}"
-                                            + (" · 고품질" if p.quality == "hq" else "")
-                                            + (" · 음색 참고" if self.refs else ""))
-        self.cmp_hint.setText(f"비교 시험 = 배경음악 스타일 {len(prompt.STYLES)}가지를 {prompt.COMPARE_SECONDS}초씩"
-                              "(고른 품질 · 같은 씨앗).")
-        big = jobs.xl_ok()
-        for i in range(self._q_row.count()):                           # 품질 선택은 XL 을 쓸 수 있는 컴퓨터에서만
-            w_ = self._q_row.itemAt(i).widget()
-            if w_ is not None:
-                w_.setVisible(big)
+        custom = bool(p.caption)
+        self.stages["generate"].set_summary(f"{st[1]}{'(직접 고침)' if custom else ''} · {len_txt} · 후보 {p.candidates}"
+                                            + (" · 음색 참고" if self.refs and not (p.src_feel and use_src) else ""))
+        self.cap_note.setText("직접 고침 — 스타일을 다시 고르면 지워집니다" if custom else f"자동(스타일: {st[1]})")
+        self.cap_note.setStyleSheet(f"color:{WARN if custom else SUB_TXT}; font-size:11px;")
+        self.b_reset.setEnabled(custom)
         cur = self._current()
         self.title.setPlaceholderText("비우면 원곡 이름 첫 단어" + (f" (예: {prompt.first_word(cur.name)})" if cur else ""))
-        if not self.refs:
+        if p.src_feel and use_src:
+            rt = "원곡 느낌 참고를 켜서 원곡을 씁니다"
+        elif not self.refs:
             rt = "없음 — 실제 연주 녹음을 넣으면 음색만 참고"
         else:
             rt = Path(self.refs[0]).name + (f" 외 {len(self.refs) - 1}개" if len(self.refs) > 1 else "")
         self.ref_lab.setText(self.ref_lab.fontMetrics().elidedText(rt, Qt.ElideMiddle, 250))
-        if self.refs:
-            self.ref_lab.setToolTip("\n".join(self.refs))
+        self.ref_lab.setToolTip("\n".join(self.refs) if self.refs else
+                                "선택 사항 · 같은 편성의 실제 연주 녹음만 넣으세요. 비우면 쓰지 않습니다.")
         self.out_lab.setText(self.out_lab.fontMetrics().elidedText(str(self._out_dir()), Qt.ElideMiddle, 250))
         self.stages["output"].set_summary((f"{p.title} · " if p.title else "") + f"{p.fmt.upper()} · {self._out_dir().name}")
         # 요약 · 예상 시간
-        cs = self.checked()
-        total = sum(p.target_seconds(s) for s in cs)
-        n_out = len(cs) * p.candidates
-        if cs:
-            txt = f"원곡 {len(cs)}개 → 결과 {n_out}곡 · 만들 길이 합계 {mmss(total * p.candidates)}"
-            est = jobs.estimate(total * p.candidates)
-            txt += f" · 예상 약 {max(1, round(est / 60))}분" if est else " · 예상 시간은 첫 생성 후 표시"
-        else:
-            txt = "원곡을 넣어 주세요."
+        n_src = len(cs) if use_src else 1
+        total = sum(p.target_seconds(s) for s in cs) if use_src else p.target_seconds(None)
+        n_out = n_src * p.candidates
+        txt = (f"원곡 {len(cs)}개 → " if use_src else "원곡 없이 → ") + f"결과 {n_out}곡 · 만들 길이 합계 {mmss(total * p.candidates)}"
+        est = jobs.estimate(total * p.candidates)
+        txt += f" · 예상 약 {max(1, round(est / 60))}분" if est else " · 예상 시간은 첫 생성 후 표시"
         self.sum.setText(txt)
         if self.mode == "setup":
             if EG.installed():
@@ -668,23 +658,19 @@ class WorkWindow(DragMove, QWidget):
             else:
                 self.state_lab.setText("생성 엔진 설치 필요 — [AUTO]를 누르면 먼저 설치합니다(처음 한 번).")
                 self.state_lab.setStyleSheet(f"color:{WARN};")
-        self.b_start.setEnabled(self.mode == "done" or bool(cs))
+        self.b_start.setEnabled(True)
         self.b_start.setVisible(self.mode != "run")           # 설정 = [AUTO] · 생성 중 = [취소]만 · 끝 = [폴더 열기][돌아가기]
         self.b_cancel.setVisible(self.mode != "setup")
-        self.b_test.setEnabled(self.mode == "setup")
-        self.b_cmp.setEnabled(self.mode == "setup" and bool(cs))
+        self.b_cmp.setEnabled(self.mode == "setup")
         if self.mode == "setup":
             self._save_cfg()
 
     def _sel_changed(self):
         self._show_analysis(self._current())
-        if self.mood_mode.value() == "auto" and self.stages["analyze"].on:
-            s = self._current()
-            self.moods.set_value(s.analysis.moods if s is not None and s.analysis is not None else [])
 
     def _show_analysis(self, s):
         if s is None:
-            self.a_info.setText("원곡을 넣으면 템포 · 조성 · 분위기를 자동으로 찾습니다.")
+            self.a_info.setText("원곡 없음 — 스타일과 길이만으로 만듭니다.")
             return
         if s.error:
             self.a_info.setText(f"{s.name}: 읽을 수 없음 ({s.error})")
@@ -694,8 +680,9 @@ class WorkWindow(DragMove, QWidget):
             a = s.analysis
             sure = "확실" if a.key_conf >= 0.5 else ("보통" if a.key_conf >= 0.15 else "불확실 — 조성은 쓰지 않음")
             moods = " · ".join(prompt.MOOD[m][0] for m in a.moods if m in prompt.MOOD)
-            self.a_info.setText(f"{s.name}\n템포 {a.bpm:g} BPM · {a.key_label}({sure}) · 길이 {mmss(a.duration)}\n"
-                                f"분위기(자동): {moods}")
+            self.a_info.setText(self.a_info.fontMetrics().elidedText(s.name, Qt.ElideMiddle, COL_W - 40)
+                                + f"\n템포 {a.bpm:g} BPM · {a.key_label}({sure}) · 길이 {mmss(a.duration)}"
+                                + (f"\n분위기: {moods}" if moods else ""))
 
     # ================================================================ 원곡 넣기·빼기
     def add_paths(self, items):
@@ -799,22 +786,11 @@ class WorkWindow(DragMove, QWidget):
             return
         if self.mode != "setup":
             return
-        if not self.checked():
-            ui_style.notice(self, "만들 원곡이 없습니다. 원곡을 넣고 체크하세요.")
-            return
-        self._run(test=False)
-
-    def start_test(self):
-        if self.mode == "setup":
-            self._run(test=True)
+        self._run(test=False)                     # 원곡이 없어도 됨(스타일 · 길이만으로)
 
     def start_compare(self):
-        if self.mode != "setup":
-            return
-        if not self.checked():
-            ui_style.notice(self, "비교할 원곡이 없습니다. 원곡을 넣고 체크하세요.")
-            return
-        self._run(test=False, compare=True)
+        if self.mode == "setup":
+            self._run(test=False, compare=True)
 
     def _confirm_models(self, compare: bool) -> bool:
         """필요한 모델이 없으면 내려받아도 되는지 묻기(크기 · 남은 공간). 내려받기는 작업 안에서."""

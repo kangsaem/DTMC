@@ -92,19 +92,36 @@ STYLES = [
      "thunderous percussion, driving ostinato. Huge cinematic sound. Triumphant, heroic mood.", (90, 150)),
     ("synthwave", "신스웨이브", "Synthwave, retro 80s. Analog synth arpeggios, lush pads, steady electronic drums and pulsing "
      "bass. Night drive atmosphere. Dreamy, nostalgic, driving mood.", (90, 125)),
+    # 아래 둘 = 엔진 장르 목록의 'J-Rock anime opening' · 'hard rock'/'instrumental rock' + 공식 예제의 표현(보컬 부분은 뺌)
+    ("anime", "애니 오프닝", "J-Rock anime opening, instrumental. Fast-paced energetic rock with powerful electric guitars, "
+     "driving drums and melodic bass, bright synth lead carrying a catchy heroic melody, dramatic orchestral hits. "
+     "Anthemic, exciting, uplifting mood.", (150, 185)),
+    ("hardrock", "하드록", "Hard rock, instrumental rock. Heavy distorted electric guitar riffs and a soaring melodic lead "
+     "guitar solo, punchy live drums and driving bass, thick wall of rhythm guitars. Raw, powerful live band sound. "
+     "Energetic, bold, confident mood.", (110, 160)),
 ]
 STYLE_LYRICS = "[Intro]\n\n[Main Theme]\n\n[Build]\n\n[Outro - fade out]"
 STYLE_NEGATIVE = "vocals, singing, voice, rap, choir, spoken word"
 
 
-def style_request(style: tuple, *, seconds, bpm=None, key_scale="", profile=None, seed=None, ref_path=None,
-                  model=GEN_MODEL, **extra) -> dict:
-    """스타일 한 곡 요청. 원곡 템포는 스타일 범위 안일 때만 씀(아니면 엔진이 정함) · 조성은 원곡 것."""
-    _k, _ko, cap, (lo, hi) = style
-    use_bpm = bpm if bpm and lo <= float(bpm) <= hi else None
+STYLE_BY = {st[0]: st for st in STYLES}
+DEFAULT_STYLE = "chill"
+
+
+def style_caption(key: str) -> str:
+    return STYLE_BY.get(key, STYLE_BY[DEFAULT_STYLE])[2]
+
+
+def style_request(style, *, seconds, bpm=None, key_scale="", profile=None, seed=None, ref_path=None,
+                  model=GEN_MODEL, caption="", force_bpm=False, **extra) -> dict:
+    """스타일 한 곡 요청. style = 키 또는 STYLES 항목 · caption = 직접 고친 지시문(비면 스타일 것).
+    템포: force_bpm(직접 정함)이면 그대로, 아니면 원곡 템포가 스타일 범위 안일 때만(밖이면 엔진이 정함)."""
+    st = STYLE_BY.get(style, STYLE_BY[DEFAULT_STYLE]) if isinstance(style, str) else style
+    lo, hi = st[3]
+    use_bpm = bpm if bpm and (force_bpm or lo <= float(bpm) <= hi) else None
     req = request(instr_keys=["piano"], mood_keys=[], seconds=seconds, bpm=use_bpm, key_scale=key_scale,
                   profile=profile, seed=seed, ref_path=ref_path, model=model, **extra)
-    req.update({"prompt": cap, "lyrics": STYLE_LYRICS, "lm_negative_prompt": STYLE_NEGATIVE})
+    req.update({"prompt": (caption or "").strip() or st[2], "lyrics": STYLE_LYRICS, "lm_negative_prompt": STYLE_NEGATIVE})
     return req
 
 
@@ -259,7 +276,13 @@ def out_stem(title: str, source_name: str, instr_keys, tag, seconds) -> str:
     return f"{t}_{instr_label(instr_keys)}_{tag}_{len_tag(seconds)}"
 
 
+def stem(title: str, source_name: str, style_ko: str, tag, seconds) -> str:
+    """결과 파일 이름: [제목]_스타일_번호_길이. 제목이 비면 원곡 이름 첫 단어, 원곡도 없으면 스타일만."""
+    t = safe(title.strip()) if title and title.strip() else (first_word(source_name) if source_name else "")
+    return "_".join(x for x in (t, safe(style_ko), str(tag), len_tag(seconds)) if x)
+
+
 def style_stem(title: str, source_name: str, n: int, style_ko: str, seconds) -> str:
-    """스타일 샘플 파일 이름: 제목_번호-스타일_길이."""
-    t = safe(title.strip()) if title and title.strip() else first_word(source_name)
+    """스타일 샘플 파일 이름: [제목]_번호-스타일_길이."""
+    t = safe(title.strip()) if title and title.strip() else (first_word(source_name) if source_name else "샘플")
     return f"{t}_{n:02d}-{safe(style_ko)}_{len_tag(seconds)}"

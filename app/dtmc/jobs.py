@@ -45,7 +45,10 @@ class Plan:
     fmt: str = "mp3"
     out_dir: str = ""
     title: str = ""                                  # 파일 이름 앞부분(비우면 원곡 이름 첫 단어)
-    quality: str = "std"                             # std = shift3 · hq = XL(큰 그래픽 메모리만) — prompt.preset
+    quality: str = "std"                             # 늘 std(shift3 + 큰 GPU 면 작곡 4B + 대체 변환부) — XL 선택은 v0.1.12 에서 뺌
+    style: str = prompt.DEFAULT_STYLE                # 스타일 키(prompt.STYLES)
+    caption: str = ""                                # 직접 고친 지시문(비면 스타일 지시문)
+    src_feel: bool = False                           # 원곡 느낌 참고 = 원곡 소리를 음색 참고로(멜로디는 안 따라감)
     refs: list = field(default_factory=list)         # 음색 참고 음원(실제 악기 녹음, 최대 3개) — 비우면 안 씀
 
     def target_seconds(self, src: Source | None) -> float:
@@ -231,23 +234,21 @@ class MakeJob(QThread):
             return self._run_test(out_dir)
         if self.compare:
             return self._run_compare(out_dir)
-        srcs = [s for s in self.sources if s.checked and not s.error]
-        if not srcs:
-            raise EG.EngineError("만들 원곡이 없습니다.")
+        srcs = [s for s in self.sources if s.checked and not s.error] or [None]      # 원곡은 선택 사항(없으면 스타일만으로)
         if p.analyze_on:
-            for i, s in enumerate(srcs):
+            real = [s for s in srcs if s is not None]
+            for i, s in enumerate(real):
                 if self.cancel:
                     raise EG.Cancelled("취소했습니다")
-                self.step.emit("analyze", i / len(srcs), s.name)
+                self.step.emit("analyze", i / len(real), s.name)
                 if s.analysis is None:
                     s.analysis = analyze.analyze_file(s.path)
                     s.duration = s.analysis.duration
             self.step.emit("analyze", 1.0, "")
         work = EG.tmp_dir() / time.strftime("job_%Y%m%d_%H%M%S")
         try:
-            ref = self._ref(work)
             for i, s in enumerate(srcs):
-                self._make_one(i, len(srcs), s, work, out_dir, ref)
+                self._make_one(i, len(srcs), s, work, out_dir)
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -258,33 +259,44 @@ class MakeJob(QThread):
             return list(s.analysis.moods)
         return ["calm"]
 
-    def _ref(self, work: Path):
-        """음색 참고 음원(있으면) → 엔진이 읽을 수 있는 곳(엔진 tmp)에 한 파일로."""
-        files = [f for f in self.plan.refs if f and Path(f).is_file()][: prompt.MAX_REFS]
+    def _ref(self, work: Path, s: Source | None = None):
+        """음색 참고 음원 → 엔진이 읽을 수 있는 곳(엔진 tmp)에 한 파일로.
+        원곡 느낌 참고를 켰고 원곡이 있으면 그 원곡, 아니면 '음색 참고' 칸의 파일들(없으면 None)."""
+        p = self.plan
+        if p.src_feel and p.analyze_on and s is not None:
+            files = [s.path]
+        else:
+            files = [f for f in p.refs if f and Path(f).is_file()][: prompt.MAX_REFS]
         if not files:
             return None
         self.step.emit("generate", 0.0, "음색 참고 음원 준비")
+        work.mkdir(parents=True, exist_ok=True)
         return ff.make_ref(files, work / "ref.wav")
 
-    def _meta(self, s: Source):
-        """원곡에서 읽는 것 = 템포·조성(확실할 때만). 원곡 소리는 엔진에 보내지 않음."""
+    def _meta(self, s: Source | None):
+        """원곡에서 읽는 것 = 템포·조성(확실할 때만). 원곡 소리는 '원곡 느낌 참고'를 켰을 때만 음색 참고로.
+        돌려주는 것: 분석 · 템포 · 조성 · 템포를 직접 정했는지."""
         p = self.plan
-        a = s.analysis if p.analyze_on else None
-        bpm = p.bpm if p.bpm_mode == "set" else (a.bpm if a is not None and a.bpm else None)
+        a = s.analysis if (p.analyze_on and s is not None) else None
+        if p.bpm_mode == "set":
+            return a, p.bpm, (a.key_scale if a is not None and a.key_conf >= 0.15 else ""), True
+        bpm = a.bpm if a is not None and a.bpm else None
         key = a.key_scale if a is not None and a.key_conf >= 0.15 else ""
-        return a, bpm, key
+        return a, bpm, key, False
 
-    def _make_one(self, i: int, n: int, s: Source, work: Path, out_dir: Path, ref):
+    def _make_one(self, i: int, n: int, s: Source | None, work: Path, out_dir: Path):
         p = self.plan
-        a, bpm, key = self._meta(s)
+        a, bpm, key, forced = self._meta(s)
         sec = p.target_seconds(s)
         wd = work / f"{i + 1}"
         wd.mkdir(parents=True, exist_ok=True)
-        moods = self._moods(s)
-        req = prompt.request(instr_keys=p.instruments, mood_keys=moods, seconds=sec, bpm=bpm, key_scale=key,
-                             ref_path=ref, candidates=p.candidates, profile=hw.profile(), model=self.ps["model"],
-                             **self.ps["opt"])
-        label = f"{i + 1}/{n} {s.name}"
+        st = prompt.STYLE_BY.get(p.style, prompt.STYLE_BY[prompt.DEFAULT_STYLE])
+        ref = self._ref(wd, s)
+        req = prompt.style_request(st, seconds=sec, bpm=bpm, key_scale=key, ref_path=ref, candidates=p.candidates,
+                                   profile=hw.profile(), model=self.ps["model"], caption=p.caption, force_bpm=forced,
+                                   **self.ps["opt"])
+        name = s.name if s is not None else st[1]
+        label = f"{i + 1}/{n} {name}"
         t0 = time.monotonic()
 
         def prog(f, text):
@@ -293,17 +305,18 @@ class MakeJob(QThread):
         wavs = self.eng.generate(req, wd, prog, self.stopped)
         remember_speed(sec * len(wavs), time.monotonic() - t0)
         self.step.emit("generate", (i + 0.97) / n, f"{label} · 저장")
-        ilab = prompt.instr_label(p.instruments)
+        slab = st[1] + (" · 직접 고침" if (p.caption or "").strip() and p.caption.strip() != st[2] else "")
         saved = []
         for k, w in enumerate(wavs):
-            stem = prompt.out_stem(p.title, s.name, p.instruments, k + 1, sec)
+            stem = prompt.stem(p.title, s.name if s is not None else "", st[1], k + 1, sec)
             dst = unique(out_dir / (stem + ff.FORMATS[p.fmt][0]))
             out = ff.convert(w, dst, p.fmt)
             self.outputs.append(out)
             saved.append(str(out))
-            self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "instr": ilab, "n": k + 1,
+            self.item.emit({"path": str(out), "source": s.name if s is not None else "", "label": slab,
+                            "src_path": s.path if s is not None else "", "instr": "", "n": k + 1,
                             "of": len(wavs), "seconds": sec})
-        write_history(self._record(req, s, saved, moods, sec, a))
+        write_history(self._record(req, s, saved, [], sec, a, style=st[0], src_feel=bool(p.src_feel and s is not None)))
         self.step.emit("generate", (i + 1) / n, f"{label} 완료")
 
     def _record(self, req: dict, s: Source | None, saved: list, moods: list, sec: float, a=None, **more) -> dict:
@@ -313,7 +326,7 @@ class MakeJob(QThread):
                "bpm": req.get("bpm"), "key": req.get("key_scale"), "task": req.get("task_type"),
                "model": req.get("model"), "thinking": req.get("thinking"), "caption": req.get("prompt"),
                "lyrics": req.get("lyrics"), "negative": req.get("lm_negative_prompt"),
-               "refs": list(self.plan.refs) if req.get("reference_audio_path") else [],
+               "refs": (list(self.plan.refs) if req.get("reference_audio_path") else []),
                "seed": req.get("seed"), "mode": hw.profile().mode, "quality": getattr(self, "ps", {}).get("quality"),
                "server_env": getattr(self, "senv", {}), "lm": getattr(self.eng, "lm_loaded", ""),
                "dcw_enabled": req.get("dcw_enabled"),
@@ -351,34 +364,31 @@ class MakeJob(QThread):
             shutil.rmtree(work, ignore_errors=True)
 
     def _run_compare(self, out_dir: Path):
-        """스타일 샘플(v0.1.11): 첫 원곡 기준 60초 · 같은 씨앗 · 고른 품질로 prompt.STYLES 를 한 곡씩.
-        원곡에서는 조성과(스타일 범위 안일 때만) 템포를 가져옴. 한 곡이 실패해도 나머지는 계속."""
+        """스타일 샘플: 60초 · 같은 씨앗으로 prompt.STYLES 를 한 곡씩(각 스타일의 기본 지시문).
+        첫 원곡이 있으면 조성과(스타일 범위 안일 때만) 템포를 가져옴 — 원곡 없이도 됨. 한 곡이 실패해도 나머지는 계속."""
         p = self.plan
         srcs = [s for s in self.sources if s.checked and not s.error]
-        if not srcs:
-            raise EG.EngineError("기준으로 삼을 원곡이 없습니다.")
-        s = srcs[0]
-        if s.analysis is None and p.analyze_on:
+        s = srcs[0] if srcs else None
+        if s is not None and s.analysis is None and p.analyze_on:
             s.analysis = analyze.analyze_file(s.path)
             s.duration = s.analysis.duration
-        a, bpm, key = self._meta(s)
+        a, bpm, key, forced = self._meta(s)
         sec = float(prompt.COMPARE_SECONDS)
         seed = random.randint(1, 2 ** 31 - 1)
         styles = prompt.STYLES
         n = len(styles)
         work = EG.tmp_dir() / time.strftime("cmp_%Y%m%d_%H%M%S")
         work.mkdir(parents=True, exist_ok=True)
-        qname = dict(prompt.QUALITIES)[self.ps["quality"]]
         failed = []
         try:
-            ref = self._ref(work)
+            ref = self._ref(work, s)
             for i, st in enumerate(styles):
                 if self.cancel:
                     raise EG.Cancelled("취소했습니다")
                 ko = st[1]
                 head = f"{i + 1}/{n} "
                 req = prompt.style_request(st, seconds=sec, bpm=bpm, key_scale=key, ref_path=ref, profile=hw.profile(),
-                                           seed=seed, model=self.ps["model"], **self.ps["opt"])
+                                           seed=seed, model=self.ps["model"], force_bpm=forced, **self.ps["opt"])
                 t0 = time.monotonic()
 
                 def prog(f, text, i=i, ko=ko, t0=t0):
@@ -397,11 +407,12 @@ class MakeJob(QThread):
                         self.eng.start(lambda t: None, self.stopped, extra_env=self.senv)
                     continue
                 remember_speed(sec, time.monotonic() - t0)
-                stem = prompt.style_stem(p.title, s.name, i + 1, ko, sec)
+                stem = prompt.style_stem(p.title, s.name if s is not None else "", i + 1, ko, sec)
                 out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
                 self.outputs.append(out)
-                self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "label": f"{i + 1}. {ko}",
-                                "instr": qname, "seed": seed, "n": 1, "of": 1, "seconds": sec})
+                self.item.emit({"path": str(out), "source": s.name if s is not None else "",
+                                "src_path": s.path if s is not None else "", "label": f"{i + 1}. {ko}",
+                                "instr": "", "seed": seed, "n": 1, "of": 1, "seconds": sec})
                 write_history(self._record(req, s, [str(out)], [], sec, a, kind="style_sample", style=st[0]))
                 self.step.emit("generate", (i + 1) / n, f"{head}{ko} 완료")
             if failed and not self.outputs:

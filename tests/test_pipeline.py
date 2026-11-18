@@ -56,6 +56,17 @@ assert r["model"] == "acestep-v15-turbo-shift3" and "src_audio_path" not in r an
 assert not hasattr(jobs.Plan(), "strength")                    # 커버(원곡 반영 %) 삭제
 print("prompt ok")
 
+# 스타일 12 · 파일 이름(v0.1.12)
+assert len(prompt.STYLES) == 12 and {"anime", "hardrock"} <= set(prompt.STYLE_BY)
+assert prompt.stem("", "", "칠아웃", 1, 60) == "칠아웃_1_1m" and prompt.stem("", "Love Good", "하드록", 2, 95) == "Love_하드록_2_1m35s"
+assert prompt.stem(" 달:밤 ", "x", "로파이", 1, 30) == "달_밤_로파이_1_30s"
+sr = prompt.style_request("anime", seconds=30, bpm=110, key_scale="A major")
+assert "bpm" not in sr and sr["key_scale"] == "A major" and sr["prompt"].startswith("J-Rock anime opening")   # 110 = 범위 밖 → 엔진이 정함
+assert prompt.style_request("anime", seconds=30, bpm=110, force_bpm=True)["bpm"] == 110                        # 직접 정하면 그대로
+sr = prompt.style_request("hardrock", seconds=30, bpm=120, caption="  my own prompt  ", candidates=3)
+assert sr["prompt"] == "my own prompt" and sr["bpm"] == 120 and sr["batch_size"] == 3 and "vocals" in sr["lm_negative_prompt"]
+assert sr["task_type"] == "text2music" and sr["model"] == prompt.GEN_MODEL and sr["lyrics"] == prompt.STYLE_LYRICS
+
 tmp = Path(tempfile.mkdtemp(prefix="dtmc_pipe_"))
 src = ff.make_test_tone(tmp / "원곡 테스트.wav", 20, 96)
 ref1 = ff.make_test_tone(tmp / "piano ref 1.wav", 12, 80)
@@ -63,11 +74,16 @@ ref2 = ff.make_test_tone(tmp / "piano ref 2.wav", 50, 80)
 rf = ff.make_ref([ref1, ref2], tmp / "ref.wav")
 assert 89 < ff.duration(rf) < 91, ff.duration(rf)              # 2개 → 45초씩
 
+
+def last_reqs(n=1):
+    return json.loads(urllib.request.urlopen(url + "/_requests").read())[-n:]
+
+
 for fmt in ("mp3", "flac", "m4a", "ogg", "wav"):
     for refs in ([], [str(ref1), str(ref2)]):
         s = jobs.Source(str(src))
-        plan = jobs.Plan(instruments=["piano", "strings"], length_mode="set", seconds=15, refs=refs,
-                         candidates=2, fmt=fmt, out_dir=str(tmp / "out"))
+        plan = jobs.Plan(style="chill", length_mode="set", seconds=15, refs=refs, candidates=2, fmt=fmt,
+                         out_dir=str(tmp / "out"))
         job = jobs.MakeJob(engine.Engine(), [s], plan)
         res, items = run_job(job)
         assert res.get("ok"), (fmt, refs, res)
@@ -75,73 +91,73 @@ for fmt in ("mp3", "flac", "m4a", "ogg", "wav"):
         for it in items:
             p = Path(it["path"])
             assert p.exists() and p.suffix == ff.FORMATS[fmt][0], p
-            assert p.stem.startswith(f"원곡_피아노+스트링_{it['n']}_15s"), p.name
+            assert p.stem.startswith(f"원곡_칠아웃_{it['n']}_15s"), p.name
             d = ff.duration(p)
             assert 9 < d < 16, (p, d)
         print(fmt, "refs" if refs else "no refs", "ok", [Path(i["path"]).name for i in items])
 
 reqs = json.loads(urllib.request.urlopen(url + "/_requests").read())
-assert all(r["task_type"] == "text2music" and "src_audio_path" not in r for r in reqs)     # 원곡 소리는 안 보냄
-assert reqs[0]["bpm"] in (95, 96, 97) and reqs[0]["key_scale"] == "C major", reqs[0]
-assert "Performed only by piano and string ensemble." in reqs[0]["prompt"], reqs[0]["prompt"]
-assert "reference_audio_path" not in reqs[0] and os.path.isabs(reqs[1]["reference_audio_path"])
+assert all(r["task_type"] == "text2music" and "src_audio_path" not in r for r in reqs)     # 원곡 소리는 커버로 안 보냄
+assert reqs[0]["bpm"] in (95, 96, 97) and reqs[0]["key_scale"] == "C major", reqs[0]      # 96 = 칠아웃 범위 안
+assert reqs[0]["prompt"].startswith("Chillout") and "reference_audio_path" not in reqs[0]
+assert os.path.isabs(reqs[1]["reference_audio_path"])
 assert all(r["model"] == "acestep-v15-turbo-shift3" for r in reqs)          # 기본 생성 모델 = shift3
-# 템포 직접(잠금 없음)
-plan = jobs.Plan(instruments=["piano"], length_mode="set", seconds=10, bpm_mode="set", bpm=72, out_dir=str(tmp / "out"))
+# 템포 직접 · 지시문 직접 고침
+plan = jobs.Plan(style="lofi", caption="Slow sea turtle over coral, gentle lo-fi.", length_mode="set", seconds=10,
+                 bpm_mode="set", bpm=72, out_dir=str(tmp / "out"))
 res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan))
-assert res.get("ok") and json.loads(urllib.request.urlopen(url + "/_requests").read())[-1]["bpm"] == 72
+r = last_reqs()[0]
+assert res.get("ok") and r["bpm"] == 72 and r["prompt"].startswith("Slow sea turtle") and "직접 고침" in items[0]["label"]
+# 원곡 느낌 참고 = 원곡을 음색 참고로(커버 아님)
+plan = jobs.Plan(style="cinematic", src_feel=True, refs=[str(ref1)], length_mode="set", seconds=10, out_dir=str(tmp / "out"))
+res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan))
+r = last_reqs()[0]
+assert res.get("ok") and os.path.isabs(r["reference_audio_path"]) and r["task_type"] == "text2music" and "src_audio_path" not in r
+# 원곡 없이: 스타일 · 길이만
+plan = jobs.Plan(style="hardrock", length_mode="set", seconds=12, candidates=1, out_dir=str(tmp / "nosrc"))
+res, items = run_job(jobs.MakeJob(engine.Engine(), [], plan))
+r = last_reqs()[0]
+assert res.get("ok") and len(items) == 1 and Path(items[0]["path"]).name == "하드록_1_12s.mp3", (res, items)
+assert "bpm" not in r and "key_scale" not in r and r["prompt"].startswith("Hard rock") and items[0]["src_path"] == ""
+# 분석 끔 = 원곡이 있어도 안 씀
+plan = jobs.Plan(style="chill", analyze_on=False, src_feel=True, length_mode="set", seconds=10, out_dir=str(tmp / "out"))
+res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan))
+r = last_reqs()[0]
+assert res.get("ok") and "bpm" not in r and "key_scale" not in r and "reference_audio_path" not in r
 
-# 품질 선택(v0.1.11): 기본 = shift3 + 작곡 4B(큰 GPU) + 대체 변환부 · 고품질 = XL(DCW 끔) + 대체 변환부
+# 큰 GPU = 작곡 4B + 대체 변환부 환경 · 그 밖 = 대체 변환부만(XL 선택은 뺌)
 from dtmc import hw  # noqa: E402
 
 ps = prompt.preset("std", True)
 assert ps["model"] == prompt.GEN_MODEL and ps["opt"] == {} and ps["env"] == {**prompt.ENV_VAE, **prompt.ENV_LM4B}
-ps = prompt.preset("hq", True)
-assert ps["model"] == prompt.XL_TURBO and ps["opt"] == {"dcw_enabled": False} and ps["env"] == prompt.ENV_VAE
-ps = prompt.preset("hq", False)                                # XL 못 쓰는 컴퓨터 = 늘 기본(작곡 4B 없이)
-assert ps["quality"] == "std" and ps["model"] == prompt.GEN_MODEL and ps["env"] == prompt.ENV_VAE
+assert prompt.preset("std", False)["env"] == prompt.ENV_VAE
 e = engine.Engine()
 assert e.server_env(prompt.ENV_VAE)["ACESTEP_VAE_CHECKPOINT"] == "scragvae" and "ACESTEP_VAE_CHECKPOINT" not in e.server_env()
-
 real_gpu = hw.gpu
 hw.gpu = lambda: hw.Gpu("시험 GPU", 24.0, "999.0")
 hw._PROFILE = hw.Profile("gpu", "test", True, "acestep-5Hz-lm-1.7B", True, 2)
-n0 = len(json.loads(urllib.request.urlopen(url + "/_requests").read()))
-plan = jobs.Plan(instruments=["piano"], length_mode="set", seconds=10, quality="hq", out_dir=str(tmp / "hq"))
-job = jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan)
+job = jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], jobs.Plan(length_mode="set", seconds=10, out_dir=str(tmp / "big")))
 res, items = run_job(job)
-r = json.loads(urllib.request.urlopen(url + "/_requests").read())[-1]
-assert res.get("ok") and r["model"] == prompt.XL_TURBO and r["dcw_enabled"] is False and r["inference_steps"] == 8, r
-assert job.senv == prompt.ENV_VAE and job.ps["quality"] == "hq"
-job = jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], jobs.Plan(length_mode="set", seconds=10, out_dir=str(tmp / "hq")))
-res, items = run_job(job)
-r = json.loads(urllib.request.urlopen(url + "/_requests").read())[-1]
-assert res.get("ok") and r["model"] == prompt.GEN_MODEL and "dcw_enabled" not in r
+r = last_reqs()[0]
+assert res.get("ok") and r["model"] == prompt.GEN_MODEL and "dcw_enabled" not in r and r["thinking"] is True
 assert job.senv == {**prompt.ENV_VAE, **prompt.ENV_LM4B}, job.senv
 
-# 비교 시험 = 스타일 샘플 10곡(고른 품질 · 같은 씨앗)
+# 스타일 샘플 12곡(같은 씨앗) — 원곡 있음 / 없음
 n0 = len(json.loads(urllib.request.urlopen(url + "/_requests").read()))
-plan = jobs.Plan(fmt="mp3", out_dir=str(tmp / "cmp"), title="Dive", quality="hq")
+plan = jobs.Plan(fmt="mp3", out_dir=str(tmp / "cmp"), title="Dive")
 res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan, compare=True))
-assert res.get("ok") and len(items) == len(prompt.STYLES) == 10, (res, len(items))
+assert res.get("ok") and len(items) == 12, (res, len(items))
 names = [Path(i["path"]).name for i in items]
-assert names[0] == "Dive_01-수중 앰비언트_1m.mp3" and names[-1] == "Dive_10-신스웨이브_1m.mp3", names
+assert names[0] == "Dive_01-수중 앰비언트_1m.mp3" and names[-1] == "Dive_12-하드록_1m.mp3", names
 creq = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:]
-assert all(r["model"] == prompt.XL_TURBO and r["dcw_enabled"] is False and r["task_type"] == "text2music" for r in creq)
-assert len({r["seed"] for r in creq}) == 1 and len({r["prompt"] for r in creq}) == 10
-assert creq[0]["prompt"].startswith("Ambient") and "vocals" in creq[0]["lm_negative_prompt"]
-assert all(r["key_scale"] == "C major" for r in creq)                       # 조성 = 원곡 것
-assert "bpm" not in creq[0] and creq[3]["bpm"] in (95, 96, 97), (creq[0].get("bpm"), creq[3].get("bpm"))   # 템포 = 스타일 범위 안일 때만(원곡 96)
+assert len({r["seed"] for r in creq}) == 1 and len({r["prompt"] for r in creq}) == 12
+assert all(r["key_scale"] == "C major" and r["model"] == prompt.GEN_MODEL for r in creq)
+assert "bpm" not in creq[0] and creq[3]["bpm"] in (95, 96, 97) and "bpm" not in creq[10]   # 템포 = 스타일 범위 안일 때만
+res, items = run_job(jobs.MakeJob(engine.Engine(), [], jobs.Plan(out_dir=str(tmp / "cmp2")), compare=True))
+assert res.get("ok") and len(items) == 12 and Path(items[0]["path"]).name == "샘플_01-수중 앰비언트_1m.mp3"
 hw.gpu = real_gpu
 hw._PROFILE = None
 print("style samples ok", len(names))
-
-# 악기 시험
-plan = jobs.Plan(fmt="mp3", out_dir=str(tmp / "out"))
-job = jobs.MakeJob(engine.Engine(), [], plan, test=True)
-res, items = run_job(job)
-assert res.get("ok") and len(items) == 8, (res, len(items))
-print("instrument test ok", [Path(i["path"]).name for i in items][:3], "...")
 
 # 취소
 os.environ["MOCK_DELAY"] = "30"

@@ -229,8 +229,15 @@ class Multi(QWidget):
             g.addWidget(b, i // cols, i % cols)
         self.set_value(list(cur))
 
+    def set_swap(self, on: bool):
+        """꽉 찼을 때 다른 것을 누르면 거절하지 않고 가장 오래 켠 것과 바꿈(limit=1 이면 '하나만 고르기')."""
+        self.swap = bool(on)
+
     def _click(self, k, on):
         if on:
+            if len(self.order) >= self.limit and getattr(self, "swap", False):
+                old = self.order.pop(0)
+                self.btns[old].setChecked(False)
             if len(self.order) >= self.limit:
                 self.btns[k].setChecked(False)
                 self.refused.emit()
@@ -271,14 +278,15 @@ class StageRow(QFrame):
         self.setStyleSheet("#StageRow{background:#2a2a2a; border:1px solid #3a3a3a; border-radius:3px;}")
         self.head = QWidget(self)
         self.head.setFixedHeight(34)
-        self.head.setCursor(Qt.PointingHandCursor)
+        if not fixed:
+            self.head.setCursor(Qt.PointingHandCursor)
         self.head.installEventFilter(self)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         v.addWidget(self.head)
-        body.setVisible(False)
         v.addWidget(body)
+        self.open_ = True                          # DTME v0.17.2: 설정 칸 = 늘 펼침
 
     def set_on(self, on: bool):
         self.on = True if self.fixed else bool(on)
@@ -286,9 +294,9 @@ class StageRow(QFrame):
         self.head.update()
 
     def set_open(self, on: bool):
-        self.open_ = bool(on)
-        self.body.setVisible(self.open_)
-        self.head.update()
+        """(늘 펼침 — 예전 이름만 남김)"""
+        self.open_ = True
+        self.body.setVisible(True)
 
     def set_summary(self, text: str):
         if text != self.summary:
@@ -298,11 +306,9 @@ class StageRow(QFrame):
     def eventFilter(self, obj, e):
         if obj is self.head:
             if e.type() == QEvent.MouseButtonPress and e.button() == Qt.LeftButton:
-                if e.position().x() < 38 and not self.fixed:
+                if not self.fixed:                 # 머리 줄 아무 데나 누름 = 켬/끔(끈 단계 = 설정 흐림)
                     self.set_on(not self.on)
                     self.toggled.emit(self.key, self.on)
-                else:
-                    self.clicked.emit(self.key)
                 return True
             if e.type() == QEvent.Paint:
                 self._paint_head()
@@ -331,11 +337,9 @@ class StageRow(QFrame):
         f.setBold(False)
         p.setFont(f)
         p.setPen(QColor(SUB if act else "#6f6f6f"))
-        w = r.width() - 88 - 26
+        w = r.width() - 88 - 10
         p.drawText(QRectF(88, 0, w, r.height()), Qt.AlignVCenter | Qt.AlignLeft,
                    p.fontMetrics().elidedText(self.summary if act else "끔", Qt.ElideRight, int(w)))
-        p.setPen(QColor("#8a8a8a"))
-        p.drawText(QRectF(r.width() - 24, 0, 16, r.height()), Qt.AlignCenter, "▾" if self.open_ else "▸")
         p.end()
 
 
