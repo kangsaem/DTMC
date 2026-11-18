@@ -38,13 +38,42 @@ MOOD = {k: (ko, en) for k, ko, en in MOODS}
 MAX_MOODS = 2                             # 지시문에 넣는 분위기 수(많으면 서로 충돌)
 MAX_REFS = 3                              # 음색 참고 파일 수(엔진이 앞·중·뒤 10초씩 뽑음)
 COMPARE_SECONDS = 60
-MAIN_MODEL = "acestep-v15-turbo"
-# 비교 시험(모델 비교): (모델, 파일 이름 꼬리표, 화면 이름, 내려받기 크기 GB(대략), 필요한 그래픽 메모리 GB)
-MODELS = [
-    (MAIN_MODEL, "기본", "기본 모델", 0, 0),
-    ("acestep-v15-turbo-shift3", "shift3", "shift3(선명한 음색)", 5, 0),
-    ("acestep-v15-xl-turbo", "XL", "XL(큰 모델)", 10, 20),
-]
+MAIN_MODEL = "acestep-v15-turbo"                 # 엔진 설치 때 받는 모델(shift3 가 아직 없을 때만 씀)
+GEN_MODEL = "acestep-v15-turbo-shift3"           # 기본 생성 모델(v0.1.9, 사용자 시험: 기본 모델보다 좋음) — 처음 한 번 내려받음
+XL_TURBO = "acestep-v15-xl-turbo"                # 음색 풍부 · 다른 악기가 미세하게 새어 나옴(시험 중)
+XL_SFT = "acestep-v15-xl-sft"                    # 50단계 · CFG(지시문 엄격도) 있음
+XL_VRAM = 20                                     # XL 을 쓰는 데 필요한 그래픽 메모리(GB)
+# 모델: 화면 이름 · 내려받기 크기 GB(대략)
+MODEL_INFO = {MAIN_MODEL: ("기본 모델", 0), GEN_MODEL: ("shift3 모델", 5), XL_TURBO: ("XL 모델", 10),
+              XL_SFT: ("XL SFT 모델", 10)}
+LM_STRICT = {"lm_cfg_scale": 3.5, "lm_temperature": 0.7}     # 작곡 담당을 보수적으로(지시문 더 따름 · 무작위 덜)
+
+
+def compare_cases(xl: bool, dcw: bool) -> list:
+    """비교 시험(설정 비교) 목록: (파일 꼬리표, 화면 이름, 모델, request 에 더할 설정).
+    xl = XL 을 쓸 수 있는 컴퓨터(아니면 같은 설정을 shift3 로) · dcw = 엔진이 DCW 값을 받도록 고쳐졌는지."""
+    m = XL_TURBO if xl else GEN_MODEL
+    t = "XL" if xl else "shift3"
+    plain, emph = {"lyrics_plain": True}, {"emphasize": True}
+    allx = {**plain, **emph, **LM_STRICT}
+    cases = []
+    if xl:
+        cases.append(("shift3", "shift3 · 지금 설정(기준)", GEN_MODEL, {}))
+    cases += [
+        (f"{t}_지금", f"{t} · 지금 설정", m, {}),
+        (f"{t}_태그없음", f"{t} · 가사 칸 [Instrumental]만", m, plain),
+        (f"{t}_악기강조", f"{t} · 지시문 악기 반복 강조", m, emph),
+        (f"{t}_작곡보수", f"{t} · 작곡 담당 보수적", m, dict(LM_STRICT)),
+        (f"{t}_셋다", f"{t} · 태그없음 + 강조 + 보수", m, allx),
+    ]
+    if dcw:
+        cases += [(f"{t}_DCW끔", f"{t} · 지금 설정 + DCW 끔", m, {"dcw_enabled": False}),
+                  (f"{t}_셋다_DCW끔", f"{t} · 셋 다 + DCW 끔", m, {**allx, "dcw_enabled": False})]
+    if xl:
+        sft = {**allx, "inference_steps": 50}
+        cases += [("XLSFT_CFG4", "XL SFT · 셋 다 · 엄격도 4", XL_SFT, {**sft, "guidance_scale": 4.0}),
+                  ("XLSFT_CFG7", "XL SFT · 셋 다 · 엄격도 7", XL_SFT, {**sft, "guidance_scale": 7.0})]
+    return [(f"{i + 1:02d}-{tag}", name, model, opt) for i, (tag, name, model, opt) in enumerate(cases)]
 
 LEN_MIN, LEN_MAX = 10, 600
 
@@ -98,7 +127,7 @@ def mood_words(text: str, limit: int = 4) -> list[str]:
     return out[:limit]
 
 
-def caption(instr_keys, mood_keys, extra_moods=()) -> str:
+def caption(instr_keys, mood_keys, extra_moods=(), emphasize=False) -> str:
     """새 지시문. 악기 1개 = 그 악기 장르·묘사, 여러 개 = 첫 악기 묘사 + 편성 문장. 분위기는 최대 2개(충돌 줄이기)."""
     ks = [k for k in instr_keys if k in INSTR] or ["piano"]
     genre, desc = STYLE[ks[0]]
@@ -109,6 +138,11 @@ def caption(instr_keys, mood_keys, extra_moods=()) -> str:
     moods = list(extra_moods) or [w.strip() for m in mood_keys[:MAX_MOODS] if m in MOOD for w in MOOD[m][1].split(",")]
     if moods:
         parts.append(", ".join(dict.fromkeys(moods)).capitalize() + " mood.")
+    if emphasize:        # 엔진 튜토리얼: 원하는 요소는 단어를 반복해 강화
+        names = [INSTR[k][1] for k in ks]
+        who = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        alone = "unaccompanied solo " + names[0] if len(names) == 1 else "no other instruments join"
+        parts.append(f"Only {who} from start to end, {alone}, nothing but {who}.")
     return " ".join(parts)
 
 
@@ -127,11 +161,13 @@ def lyrics(instr_keys) -> str:
 
 
 def request(*, instr_keys, mood_keys, seconds, bpm=None, key_scale="", profile=None, seed=None, ref_path=None,
-            candidates=1, model=MAIN_MODEL) -> dict:
-    """ACE-Step /release_task JSON(text2music). ref_path = 서버가 읽을 음색 참고 음원(엔진 tmp 안 절대 경로)."""
+            candidates=1, model=GEN_MODEL, lyrics_plain=False, emphasize=False, **extra) -> dict:
+    """ACE-Step /release_task JSON(text2music). ref_path = 서버가 읽을 음색 참고 음원(엔진 tmp 안 절대 경로).
+    lyrics_plain = 가사 칸에 [Instrumental] 만 · emphasize = 지시문에서 악기 반복 강조 ·
+    extra = 그대로 더할 엔진 값(lm_cfg_scale · lm_temperature · dcw_enabled · inference_steps · guidance_scale)."""
     req = {
-        "prompt": caption(instr_keys, mood_keys),
-        "lyrics": lyrics(instr_keys),
+        "prompt": caption(instr_keys, mood_keys, emphasize=emphasize),
+        "lyrics": "[Instrumental]" if lyrics_plain else lyrics(instr_keys),
         "vocal_language": "unknown",
         "lm_negative_prompt": negative(instr_keys),
         "task_type": "text2music",
@@ -154,6 +190,7 @@ def request(*, instr_keys, mood_keys, seconds, bpm=None, key_scale="", profile=N
         req["seed"] = int(seed)
     if ref_path:
         req["reference_audio_path"] = str(ref_path)
+    req.update(extra)
     return req
 
 

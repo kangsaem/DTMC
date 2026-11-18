@@ -126,10 +126,10 @@ hw.gpu = lambda: hw.Gpu("시험 GPU", 24.0, "999.0")
 hw._PROFILE = hw.Profile("gpu", "GPU · 시험", True, "acestep-5Hz-lm-1.7B", True, 2)
 w._set_refs([str(a2), str(a1)])
 assert "Night Drive" in w.ref_lab.text() and "외 1개" in w.ref_lab.text()
-assert "XL" in w.cmp_hint.text()
+assert "10곡" in w.cmp_hint.text() and "XL" in w.cmp_hint.text(), w.cmp_hint.text()
 shot(w, "03c_work_generate_ref.png")
 w.start_compare()
-for _ in range(800):
+for _ in range(1500):
     pump(0.05)
     if w.mode == "done":
         break
@@ -139,7 +139,7 @@ from PySide6.QtCore import QEvent  # noqa: E402
 app.sendPostedEvents(None, QEvent.DeferredDelete)      # 지난 결과 줄(deleteLater) 정리
 rows = w.findChildren(ResultRow)
 names = sorted(Path(r.path).name for r in rows)
-assert names == sorted(f"봄날의_피아노+스트링_{x}_1m.mp3" for x in ("기본", "shift3", "XL")), names
+assert len(names) == 10 and names[0] == "봄날의_피아노+스트링_01-shift3_1m.mp3", names
 shot(w, "08_compare_done.png")
 w.back_to_setup()
 print("OK test_ui_smoke")

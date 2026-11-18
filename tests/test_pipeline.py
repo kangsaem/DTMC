@@ -52,7 +52,7 @@ assert "string ensemble" not in prompt.negative(["piano", "strings"])
 r = prompt.request(instr_keys=["piano"], mood_keys=["calm"], seconds=60, bpm=110, key_scale="A major", ref_path="/r.wav")
 assert r["task_type"] == "text2music" and r["vocal_language"] == "unknown" and r["lyrics"].startswith("[Intro - soft piano]")
 assert r["reference_audio_path"] == "/r.wav" and r["bpm"] == 110 and r["key_scale"] == "A major"
-assert r["model"] == "acestep-v15-turbo" and "src_audio_path" not in r and "audio_cover_strength" not in r
+assert r["model"] == "acestep-v15-turbo-shift3" and "src_audio_path" not in r and "audio_cover_strength" not in r
 assert not hasattr(jobs.Plan(), "strength")                    # 커버(원곡 반영 %) 삭제
 print("prompt ok")
 
@@ -85,13 +85,13 @@ assert all(r["task_type"] == "text2music" and "src_audio_path" not in r for r in
 assert reqs[0]["bpm"] in (95, 96, 97) and reqs[0]["key_scale"] == "C major", reqs[0]
 assert "Performed only by piano and string ensemble." in reqs[0]["prompt"], reqs[0]["prompt"]
 assert "reference_audio_path" not in reqs[0] and os.path.isabs(reqs[1]["reference_audio_path"])
-assert all(r["model"] == "acestep-v15-turbo" for r in reqs)
+assert all(r["model"] == "acestep-v15-turbo-shift3" for r in reqs)          # 기본 생성 모델 = shift3
 # 템포 직접(잠금 없음)
 plan = jobs.Plan(instruments=["piano"], length_mode="set", seconds=10, bpm_mode="set", bpm=72, out_dir=str(tmp / "out"))
 res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan))
 assert res.get("ok") and json.loads(urllib.request.urlopen(url + "/_requests").read())[-1]["bpm"] == 72
 
-# 비교 시험 = 모델 비교(같은 지시문 · 같은 씨앗). 그래픽 메모리 24GB → 기본 / shift3 / XL · 없음 → 기본 / shift3
+# 비교 시험 = 설정 비교(같은 씨앗). 그래픽 메모리 24GB → shift3 기준 + XL turbo 7 + XL SFT 2 = 10곡
 from dtmc import hw  # noqa: E402
 
 real_gpu = hw.gpu
@@ -100,18 +100,27 @@ hw._PROFILE = hw.Profile("gpu", "test", True, "acestep-5Hz-lm-1.7B", True, 2)
 n0 = len(json.loads(urllib.request.urlopen(url + "/_requests").read()))
 plan = jobs.Plan(instruments=["piano"], fmt="mp3", out_dir=str(tmp / "cmp"), title="Tsuki", refs=[str(ref1)])
 res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan, compare=True))
-assert res.get("ok") and len(items) == 3, (res, items)
+assert res.get("ok") and len(items) == 10, (res, len(items))
 names = [Path(i["path"]).name for i in items]
-assert names == [f"Tsuki_피아노_{x}_1m.mp3" for x in ("기본", "shift3", "XL")], names
+assert names[0] == "Tsuki_피아노_01-shift3_1m.mp3" and names[1] == "Tsuki_피아노_02-XL_지금_1m.mp3", names
+assert names[-1] == "Tsuki_피아노_10-XLSFT_CFG7_1m.mp3", names
 creq = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:]
-assert [r["model"] for r in creq] == ["acestep-v15-turbo", "acestep-v15-turbo-shift3", "acestep-v15-xl-turbo"]
-assert len({r["seed"] for r in creq}) == 1 and len({r["prompt"] for r in creq}) == 1
-assert all(r["audio_duration"] == 60 and r["thinking"] is True and r["reference_audio_path"] for r in creq)
+M = [r["model"] for r in creq]
+assert M == ["acestep-v15-turbo-shift3"] + ["acestep-v15-xl-turbo"] * 7 + ["acestep-v15-xl-sft"] * 2, M
+assert len({r["seed"] for r in creq}) == 1 and all(r["audio_duration"] == 60 and r["thinking"] is True for r in creq)
+assert creq[1]["lyrics"].startswith("[Intro") and "lm_cfg_scale" not in creq[1] and "dcw_enabled" not in creq[1]
+assert creq[2]["lyrics"] == "[Instrumental]" and creq[2]["prompt"] == creq[1]["prompt"]
+assert "unaccompanied solo piano" in creq[3]["prompt"] and creq[3]["lyrics"].startswith("[Intro")
+assert creq[4]["lm_cfg_scale"] == 3.5 and creq[4]["lm_temperature"] == 0.7
+assert creq[5]["lyrics"] == "[Instrumental]" and "Only piano" in creq[5]["prompt"] and creq[5]["lm_cfg_scale"] == 3.5
+assert creq[6]["dcw_enabled"] is False and creq[7]["dcw_enabled"] is False and creq[7]["lyrics"] == "[Instrumental]"
+assert creq[8]["inference_steps"] == 50 and creq[8]["guidance_scale"] == 4.0 and creq[9]["guidance_scale"] == 7.0
 hw.gpu = real_gpu
 hw._PROFILE = hw.Profile("cpu", "test", False, "", False, 1)
-assert [m[1] for m in jobs.compare_models()] == ["기본", "shift3"]
+cs = prompt.compare_cases(jobs.xl_ok(), False)                 # XL 못 씀 · DCW 못 고침 → shift3 로 5곡
+assert len(cs) == 5 and all(c[2] == prompt.GEN_MODEL for c in cs) and cs[0][0] == "01-shift3_지금", cs
 hw._PROFILE = None
-print("compare ok", names)
+print("compare ok", len(names))
 
 # 악기 시험
 plan = jobs.Plan(fmt="mp3", out_dir=str(tmp / "out"))

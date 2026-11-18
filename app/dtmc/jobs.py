@@ -176,6 +176,18 @@ class MakeJob(QThread):
             settings.put("start_" + hw.profile().mode, round(time.monotonic() - t0, 1))
         self.step.emit("engine", 1.0, "엔진 준비됨")
 
+    def _need(self, model: str, frac: float = 0.0, head: str = ""):
+        """모델이 없으면 내려받음(처음 한 번). 진행 글 = 생성 단계 막대에."""
+        if EG.model_ready(model):
+            return
+        name = prompt.MODEL_INFO.get(model, (model, 0))[0]
+        t1 = time.monotonic()
+
+        def dl(t):
+            self.step.emit("generate", frac, f"{head}{name} 내려받는 중 · {int(time.monotonic() - t1)}초 · {t[:50]}")
+        self.step.emit("generate", frac, f"{head}{name} 내려받는 중(처음 한 번)")
+        EG.download_model(model, dl, self.stopped)
+
     def _out_dir(self) -> Path:
         d = Path(self.plan.out_dir) if self.plan.out_dir else paths.default_out_dir()
         d.mkdir(parents=True, exist_ok=True)
@@ -203,6 +215,7 @@ class MakeJob(QThread):
             self.step.emit("analyze", 1.0, "")
         work = EG.tmp_dir() / time.strftime("job_%Y%m%d_%H%M%S")
         try:
+            self._need(prompt.GEN_MODEL)
             ref = self._ref(work)
             for i, s in enumerate(srcs):
                 self._make_one(i, len(srcs), s, work, out_dir, ref)
@@ -282,6 +295,7 @@ class MakeJob(QThread):
         d.mkdir(parents=True, exist_ok=True)
         work = EG.tmp_dir() / time.strftime("test_%Y%m%d_%H%M%S")
         try:
+            self._need(prompt.GEN_MODEL)
             for i, k in enumerate(keys):
                 if self.cancel:
                     raise EG.Cancelled("취소했습니다")
@@ -305,7 +319,8 @@ class MakeJob(QThread):
             shutil.rmtree(work, ignore_errors=True)
 
     def _run_compare(self, out_dir: Path):
-        """모델 비교(v0.1.8): 첫 원곡 기준 60초 · 같은 지시문 · 같은 씨앗으로 모델만 바꿔 가며(기본 / shift3 / XL).
+        """설정 비교(v0.1.9): 첫 원곡 기준 60초 · 같은 씨앗으로 설정만 바꿔 가며 여러 곡(prompt.compare_cases).
+        XL 을 쓸 수 있으면 XL turbo 로(다른 악기가 새어 나오는 것을 줄이는 설정 찾기) + XL SFT, 아니면 shift3 로.
         없는 모델은 먼저 내려받음. 다음 [AUTO] 는 요청에 기본 모델을 적으므로 서버가 스스로 되돌림."""
         p = self.plan
         srcs = [s for s in self.sources if s.checked and not s.error]
@@ -319,47 +334,49 @@ class MakeJob(QThread):
         sec = float(prompt.COMPARE_SECONDS)
         seed = random.randint(1, 2 ** 31 - 1)
         moods = self._moods(s)
-        models = compare_models()
-        n = len(models)
+        cases = prompt.compare_cases(xl_ok(), bool(EG.external_url() or getattr(self.eng, "dcw", False)))
+        n = len(cases)
         work = EG.tmp_dir() / time.strftime("cmp_%Y%m%d_%H%M%S")
         work.mkdir(parents=True, exist_ok=True)
         ilab = prompt.instr_label(p.instruments)
         try:
             ref = self._ref(work)
-            for i, (model, tag, name, _gb, _vram) in enumerate(models):
+            for i, (tag, name, model, opt) in enumerate(cases):
                 if self.cancel:
                     raise EG.Cancelled("취소했습니다")
-                if not EG.model_ready(model):
-                    t1 = time.monotonic()
-
-                    def dl(t, i=i, name=name, t1=t1):
-                        self.step.emit("generate", i / n, f"{i + 1}/{n} {name} 내려받는 중 · {int(time.monotonic() - t1)}초 · {t[:50]}")
-                    self.step.emit("generate", i / n, f"{i + 1}/{n} {name} 내려받는 중(처음 한 번)")
-                    EG.download_model(model, dl, self.stopped)
+                self._need(model, i / n, f"{i + 1}/{n} ")
                 req = prompt.request(instr_keys=p.instruments, mood_keys=moods, seconds=sec, bpm=bpm, key_scale=key,
-                                     ref_path=ref, candidates=1, profile=hw.profile(), seed=seed, model=model)
+                                     ref_path=ref, candidates=1, profile=hw.profile(), seed=seed, model=model, **opt)
                 t0 = time.monotonic()
 
                 def prog(f, text, i=i, name=name, t0=t0):
                     self.step.emit("generate", (i + min(0.95, max(0.0, f))) / n,
                                    f"{i + 1}/{n} {name} · {int(time.monotonic() - t0)}초")
-                self.step.emit("generate", i / n, f"{i + 1}/{n} {name} · 모델 읽는 중")
+                self.step.emit("generate", i / n, f"{i + 1}/{n} {name}")
                 wavs = self.eng.generate(req, work / f"{i + 1}", prog, self.stopped)
-                if model == prompt.MAIN_MODEL:
-                    remember_speed(sec, time.monotonic() - t0)
                 stem = prompt.out_stem(p.title, s.name, p.instruments, tag, sec)
                 out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
                 self.outputs.append(out)
                 self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "label": f"{i + 1}. {name}",
                                 "instr": ilab, "seed": seed, "n": 1, "of": 1, "seconds": sec})
-                write_history(self._record(req, s, [str(out)], moods, sec, a, kind="compare_model"))
+                write_history(self._record(req, s, [str(out)], moods, sec, a, kind="compare_settings", case=tag,
+                                           options=opt))
                 self.step.emit("generate", (i + 1) / n, f"{i + 1}/{n} {name} 완료")
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
 
-def compare_models() -> list:
-    """이 컴퓨터에서 비교할 모델: 기본 · shift3 · (그래픽 메모리 20GB 이상이면) XL."""
+def xl_ok() -> bool:
+    """XL 모델을 쓸 수 있는 컴퓨터인지(NVIDIA 그래픽 메모리 20GB 이상)."""
     g = hw.gpu()
-    vram = g.vram_gb if g is not None and hw.profile().mode == "gpu" else 0
-    return [m for m in prompt.MODELS if m[4] <= vram or m[4] == 0]
+    return bool(g is not None and hw.profile().mode == "gpu" and g.vram_gb >= prompt.XL_VRAM)
+
+
+def needed_models(compare: bool) -> list:
+    """이번 작업에 필요한데 아직 없는 모델."""
+    ms = [prompt.GEN_MODEL]
+    if compare:
+        for _t, _n, m, _o in prompt.compare_cases(xl_ok(), False):
+            if m not in ms:
+                ms.append(m)
+    return [m for m in ms if not EG.model_ready(m)]

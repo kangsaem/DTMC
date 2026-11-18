@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import hw, log, paths
+from . import hw, log, paths, prompt
 
 ACE_COMMIT = "ca1e85fe9430179831e6bc6be790c332190a3866"     # 고정 버전(2026-08-29). 바꾸면 build.yml 도 같이
 PYTHON = "3.11"
@@ -434,7 +434,37 @@ def install(on_step, on_line, should_stop) -> None:
     on_line("설치 완료")
 
 
-# ------------------------------------------------------------ 추가 모델(비교 시험)
+# ------------------------------------------------------------ 추가 모델
+def start_model() -> str:
+    """서버가 켜질 때 읽을 모델: 기본 생성 모델(shift3)을 받아 뒀으면 그것, 아니면 설치 때 받은 모델."""
+    return prompt.GEN_MODEL if (checkpoints() / prompt.GEN_MODEL / ".dtmc_ok").is_file() else MAIN_MODEL
+
+
+_DCW_AT = '        shift=parser.float("shift", 3.0),\n'
+_DCW_ADD = ('        dcw_enabled=(None if parser.get("dcw_enabled") is None else parser.bool("dcw_enabled")),  # DTMC\n'
+            '        dcw_scaler=parser.float("dcw_scaler", 0.05),  # DTMC\n'
+            '        dcw_high_scaler=parser.float("dcw_high_scaler", 0.02),  # DTMC\n')
+
+
+def patch_dcw(root: Path | None = None) -> bool:
+    """엔진 HTTP 요청이 DCW(터보 계열에 기본으로 켜진 실험적 보정) 값을 받도록 요청 처리 파일에 3줄을 더함.
+    (ACE-Step ca1e85f 는 요청 모델에 dcw_* 칸이 있지만 HTTP 경로가 읽지 않음.) 이미 했으면 그대로 · 못 하면 False."""
+    f = (root or project()) / "acestep" / "api" / "http" / "release_task_request_builder.py"
+    try:
+        s = f.read_text(encoding="utf-8")
+        if "dcw_enabled=" in s:
+            return True
+        if s.count(_DCW_AT) != 1:
+            L.warning("DCW 고치기: 넣을 자리를 못 찾음")
+            return False
+        f.write_text(s.replace(_DCW_AT, _DCW_AT + _DCW_ADD), encoding="utf-8")
+        L.info("엔진 요청 처리에 DCW 값 받기 추가")
+        return True
+    except Exception as e:  # noqa: BLE001
+        L.warning("DCW 고치기 실패: %s", e)
+        return False
+
+
 def model_ready(model: str) -> bool:
     """내려받기가 끝난 모델인지(기본 모델 = 설치 때 받음 · 추가 모델 = 끝나면 표시 파일을 둠)."""
     if external_url() or model == MAIN_MODEL:
@@ -468,6 +498,8 @@ class Engine:
     """서버 하나를 띄워 두고 요청. 여러 스레드에서 쓰지 않음(작업 스레드 하나)."""
 
     def __init__(self):
+        self.dcw = bool(external_url())           # 엔진이 DCW 값을 받는지(start 에서 정해짐 · 가짜 엔진 = 받는다고 봄)
+        self.cur_model, self.model_note = MAIN_MODEL, ""
         self.proc: subprocess.Popen | None = None
         self.base = external_url()
         self.lines: list[str] = []
@@ -499,7 +531,7 @@ class Engine:
         if pr.mode == "cpu":
             e["ACESTEP_DEVICE"] = "cpu"
             e["CUDA_VISIBLE_DEVICES"] = ""
-        e["ACESTEP_CONFIG_PATH"] = MAIN_MODEL
+        e["ACESTEP_CONFIG_PATH"] = start_model()
         # ACE-Step 서버 기본 = 모델을 첫 요청 때 읽음(ACESTEP_NO_INIT 기본 true) → /health 의 models_initialized 가
         # 계속 False 라 '엔진 준비 0%'에서 멈춤(v0.1.2 실기). 시작할 때 읽게 함 → 준비되면 바로 생성.
         e["ACESTEP_NO_INIT"] = "false"
@@ -532,7 +564,8 @@ class Engine:
         L.info("엔진 시작(%s): %s", pr.label, " ".join(cmd))
         log.engine_line("$ " + " ".join(cmd))
         self.lines = []
-        self.cur_model, self.model_note = MAIN_MODEL, ""
+        self.cur_model, self.model_note = start_model(), ""
+        self.dcw = patch_dcw()
         self.proc = subprocess.Popen(cmd, cwd=str(project()), env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      stdin=subprocess.DEVNULL, creationflags=hw.NO_WINDOW)
         _assign_job(self.proc)

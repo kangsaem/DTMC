@@ -473,7 +473,7 @@ class WorkWindow(DragMove, QWidget):
         self.b_test = small_button("악기 시험", 88, 28, "8개 악기를 20초씩 만들어 음질을 비교(원곡 필요 없음)")
         self.b_test.clicked.connect(self.start_test)
         self.b_cmp = small_button("비교 시험", 88, 28,
-                                  f"첫 원곡 기준 {prompt.COMPARE_SECONDS}초를 같은 씨앗으로, 모델만 바꿔 가며 만듭니다")
+                                  f"첫 원곡 기준 {prompt.COMPARE_SECONDS}초를 같은 씨앗으로, 설정만 바꿔 가며 여러 곡 만듭니다")
         self.b_cmp.clicked.connect(self.start_compare)
         trow = QHBoxLayout()
         trow.setSpacing(8)
@@ -627,9 +627,9 @@ class WorkWindow(DragMove, QWidget):
         len_txt = "원곡 길이" if p.length_mode == "src" else mmss(p.seconds)
         self.stages["generate"].set_summary(f"{prompt.instr_label(p.instruments)} · {len_txt} · 후보 {p.candidates}"
                                             + (" · 음색 참고" if self.refs else ""))
-        ms = jobs.compare_models()
-        self.cmp_hint.setText(f"비교 시험 = {prompt.COMPARE_SECONDS}초를 같은 씨앗으로, 모델만 바꿔 "
-                              + " / ".join(m[1] for m in ms) + ".")
+        nc = len(prompt.compare_cases(jobs.xl_ok(), True))
+        self.cmp_hint.setText(f"비교 시험 = {prompt.COMPARE_SECONDS}초를 같은 씨앗으로, 설정만 바꿔 최대 {nc}곡"
+                              + ("(XL 중심)." if jobs.xl_ok() else "."))
         cur = self._current()
         self.title.setPlaceholderText("비우면 원곡 이름 첫 단어" + (f" (예: {prompt.first_word(cur.name)})" if cur else ""))
         if not self.refs:
@@ -803,23 +803,28 @@ class WorkWindow(DragMove, QWidget):
         if not self.checked():
             ui_style.notice(self, "비교할 원곡이 없습니다. 원곡을 넣고 체크하세요.")
             return
-        need = [m for m in jobs.compare_models() if not EG.model_ready(m[0])]
-        if need and EG.installed():
-            gb = sum(m[3] for m in need)
-            free = hw.disk_free_gb(EG.checkpoints().parent)
-            names = ", ".join(m[2] for m in need)
-            if free and free < gb + 5:
-                ui_style.notice(self, f"모델을 내려받을 공간이 부족합니다.\n필요 약 {gb}GB · 남은 공간 {free:g}GB")
-                return
-            r = ui_style.confirm(self, f"비교할 모델을 먼저 내려받습니다(처음 한 번).\n{names}\n약 {gb}GB"
-                                 + (f" · 남은 공간 {free:g}GB" if free else ""),
-                                 [("cancel", "취소", 72, None), ("ok", "내려받고 시작", 110, "blue")])
-            if r != "ok":
-                return
         self._run(test=False, compare=True)
+
+    def _confirm_models(self, compare: bool) -> bool:
+        """필요한 모델이 없으면 내려받아도 되는지 묻기(크기 · 남은 공간). 내려받기는 작업 안에서."""
+        need = jobs.needed_models(compare)
+        if not need:
+            return True
+        gb = sum(prompt.MODEL_INFO[m][1] for m in need)
+        free = hw.disk_free_gb(EG.checkpoints().parent)
+        names = ", ".join(prompt.MODEL_INFO[m][0] for m in need)
+        if free and free < gb + 5:
+            ui_style.notice(self, f"모델을 내려받을 공간이 부족합니다.\n{names}\n필요 약 {gb}GB · 남은 공간 {free:g}GB")
+            return False
+        r = ui_style.confirm(self, f"모델을 먼저 내려받습니다(처음 한 번).\n{names}\n약 {gb}GB"
+                             + (f" · 남은 공간 {free:g}GB" if free else ""),
+                             [("cancel", "취소", 72, None), ("ok", "내려받고 시작", 110, "blue")])
+        return r == "ok"
 
     def _run(self, test: bool, compare: bool = False):
         if not self._ensure_engine():
+            return
+        if not self._confirm_models(compare):
             return
         self.player.stop()
         plan = self.plan()
@@ -884,7 +889,7 @@ class WorkWindow(DragMove, QWidget):
         taskbar.flash(self)
         if ok:
             self.step_bar.finish(msg)
-            self.run_lab.halt(f"완료 · {msg}" + (" · 차례로 들어 보고 어느 모델이 나은지 알려 주세요"
+            self.run_lab.halt(f"완료 · {msg}" + (" · 차례로 들어 보고 어느 번호가 나은지 알려 주세요"
                                                 if self._compare else ""))
         else:
             self.run_lab.halt(msg)
