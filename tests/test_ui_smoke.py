@@ -75,20 +75,16 @@ assert 90 < w.sources[0].analysis.bpm < 102, w.sources[0].analysis.bpm
 w.instr.set_value(["piano", "strings"])
 w.cand.set_value("2")
 w._sync()
-assert w.slider.value() * 5 == 70 and w.sl_val.text() == "70%"           # 기본 70%
 shot(w, "03_work_generate.png")
-w.slider.setValue(18)                                                     # 90% = 노란 경고
-assert "닮지 않았는지" in w.str_hint.text()
-shot(w, "03b_work_generate_90.png")
-w.slider.setValue(14)
+assert not hasattr(w, "slider")                                           # 원곡 반영 슬라이더 삭제
 w._open_stage("analyze")
-assert not w.bpm_mode.isEnabled() and not w.bpm.isEnabled()               # 반영 > 0 = 템포 원곡 그대로(회색)
-assert w.bpm_mode.btns["src"].property("tone_color")                     # 켜진 버튼도 흐리게
-shot(w, "04_work_analyze_locked.png")
-w.slider.setValue(0)
-assert w.bpm_mode.isEnabled() and not w.bpm_mode.btns["src"].property("tone_color")
-shot(w, "04b_work_analyze_0.png")
-w.slider.setValue(14)
+assert w.bpm_mode.isEnabled()                                             # 템포 잠금 없음
+w.bpm_mode.set_value("set")
+w._sync()
+assert w.bpm.isEnabled()
+shot(w, "04_work_analyze.png")
+w.bpm_mode.set_value("src")
+w._sync()
 w._open_stage("output")
 assert "봄날의" in w.title.placeholderText(), w.title.placeholderText()
 shot(w, "05_work_output.png")
@@ -114,14 +110,8 @@ rows = w.findChildren(ResultRow)
 assert len(rows) == 4, len(rows)
 for r in rows:
     assert Path(r.path).exists()
-    assert r.b_src.isVisible() and r.strength == 70 and r.src_path
-r = rows[0]                                       # 위치 맞춤: 결과가 원곡보다 길면 원곡 길이로 접음
-r.src_ms, r.res_ms = 40000, 100000
-r.res_pos = 52000
-assert r.src_pos(52000) == 12000 and r.res_from_src(15000) == 55000
-r.strength = 0
-assert r.src_pos(52000) == 0 and r.res_from_src(15000) == 52000
-r.strength = 70
+    assert r.b_src.isVisible() and r.src_path
+
 shot(w, "07_work_done.png")
 assert w.b_cancel.isVisible() and w.b_cancel.text() == "폴더 열기" and w.b_start.text() == "돌아가기"
 w.back_to_setup()
@@ -129,19 +119,14 @@ assert w.mode == "setup" and w.b_start.text() == "AUTO"
 assert w.b_start.isVisible() and not w.b_cancel.isVisible()      # 설정 화면 = [AUTO]만
 assert w.b_close.isVisible()                                      # 오른쪽 위 [✕]
 
-# 옛 설정(low/mid/high) → 0/30/60
-from dtmc import settings  # noqa: E402
-
-w.cfg = dict(settings.get("work"), strength="high")
-w._load_cfg()
-assert w.slider.value() * 5 == 60 and settings.get("work")["strength"] == 60, settings.get("work")
-
-# 비교 시험(가짜 엔진) → 결과 4줄 + [원곡]
+# 음색 참고 2개 + 비교 시험(모델 비교, 가짜 엔진) → 결과 3줄(기본 / shift3 / XL)
 from dtmc import hw  # noqa: E402
 
+hw.gpu = lambda: hw.Gpu("시험 GPU", 24.0, "999.0")
 hw._PROFILE = hw.Profile("gpu", "GPU · 시험", True, "acestep-5Hz-lm-1.7B", True, 2)
-w._set_ref(str(a2))
-assert "Night Drive" in w.ref_lab.text()
+w._set_refs([str(a2), str(a1)])
+assert "Night Drive" in w.ref_lab.text() and "외 1개" in w.ref_lab.text()
+assert "XL" in w.cmp_hint.text()
 shot(w, "03c_work_generate_ref.png")
 w.start_compare()
 for _ in range(800):
@@ -154,7 +139,7 @@ from PySide6.QtCore import QEvent  # noqa: E402
 app.sendPostedEvents(None, QEvent.DeferredDelete)      # 지난 결과 줄(deleteLater) 정리
 rows = w.findChildren(ResultRow)
 names = sorted(Path(r.path).name for r in rows)
-assert names == sorted(f"봄날의_피아노+스트링_{x}_1m.mp3" for x in ("시험1_지금", "시험2_새지시문", "시험3_음색참고", "시험4_원곡이해")), names
+assert names == sorted(f"봄날의_피아노+스트링_{x}_1m.mp3" for x in ("기본", "shift3", "XL")), names
 shot(w, "08_compare_done.png")
 w.back_to_setup()
 print("OK test_ui_smoke")

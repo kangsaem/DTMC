@@ -10,7 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMenu, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStyle,
+                               QListWidgetItem, QMenu, QScrollArea, QSizePolicy, QSpinBox, QStyle,
                                QStyledItemDelegate, QVBoxLayout, QWidget)
 
 from . import __version__, engine as EG, ff, hw, jobs, log, paths, prompt, settings, taskbar, ui_style
@@ -21,11 +21,7 @@ L = log.log
 EMPTY_HINT = ("원곡(음원 파일) · 폴더를 여기에 끌어다 놓기", "우클릭 = 파일 추가 · 폴더 추가")
 AUDIO_FILTER = "음원 (" + " ".join(f"*{e} *{e.upper()}" for e in sorted(ff.AUDIO_EXT)) + ")"
 ROLE = Qt.UserRole + 1
-SLIDER_CSS = ("QSlider::groove:horizontal{height:6px; background:#3a3a3a; border-radius:3px;}"
-              "QSlider::sub-page:horizontal{background:#3d6fb6; border-radius:3px;}"
-              "QSlider::sub-page:horizontal:disabled{background:#4a4a4a;}"
-              "QSlider::handle:horizontal{background:#e6e6e6; width:14px; margin:-5px 0; border-radius:7px;}"
-              "QSlider::handle:horizontal:disabled{background:#777;}")
+
 
 
 def mmss(sec: float) -> str:
@@ -151,16 +147,10 @@ class ResultRow(QWidget):
         self.b_play = small_button("▶", 30, 28, "미리듣기")
         self.b_play.clicked.connect(lambda: self.play.emit(self))
         self.src_path = info.get("src_path") or ""
-        self.src_ms = int(float(info.get("src_dur") or 0) * 1000)
-        self.res_ms = int(float(info.get("seconds") or 0) * 1000)
-        self.strength = int(info.get("strength") or 0)
-        self.res_pos = 0                       # 결과를 마지막으로 듣던 위치(ms) — [원곡]과 번갈아 들을 때 이어감
-        self.b_src = small_button("원곡", 48, 26, "같은 위치의 원곡 듣기(결과와 번갈아 비교)"
-                                  if self.strength > 0 else "원곡을 처음부터 듣기(반영 0% 결과라 위치 무관)")
+        self.b_src = small_button("원곡", 48, 26, "원곡을 처음부터 듣기(분위기 비교)")
         self.b_src.clicked.connect(lambda: self.play_src.emit(self))
         self.b_src.setVisible(bool(self.src_path))
-        parts = ([info["label"]] if info.get("label") else
-                 [f"반영 {int(info.get('strength') or 0)}%"] if info.get("src_path") else []) + \
+        parts = ([info["label"]] if info.get("label") else []) + \
             [info.get("source", ""), info.get("instr", ""), mmss(info.get("seconds", 0))] + \
             ([f"씨앗 {info['seed']}"] if info.get("seed") else [])
         self._texts = (Path(self.path).name, " · ".join(x for x in parts if x))
@@ -203,23 +193,9 @@ class ResultRow(QWidget):
         self.b_src.setText("■ 원곡" if which == "src" else "원곡")
         ui_style.tone(self.b_src, "blue" if which == "src" else "")
 
-    def src_pos(self, res_pos: int) -> int:
-        """결과 위치 → 원곡 위치. 반영 0% = 처음부터 · 결과가 원곡보다 길면 원곡 길이로 접음(참고 음원이 반복이라)."""
-        if self.strength <= 0:
-            return 0
-        return res_pos % self.src_ms if self.src_ms > 0 else res_pos
-
-    def res_from_src(self, src_pos: int) -> int:
-        """원곡 위치 → 결과 위치(같은 '접힌 회차' 안에서). 반영 0% = 마지막 결과 위치 그대로."""
-        if self.strength <= 0 or self.src_ms <= 0:
-            return self.res_pos
-        pos = (self.res_pos // self.src_ms) * self.src_ms + src_pos
-        return pos if self.res_ms <= 0 or pos < self.res_ms else src_pos
-
 
 class Player:
-    """미리듣기(QtMultimedia). 못 쓰면 None 처럼 동작(▶ = 파일 열기).
-    결과(▶)와 원곡([원곡])을 번갈아 들을 때 같은 위치에서 이어 들음(ResultRow.src_pos · res_from_src)."""
+    """미리듣기(QtMultimedia). 못 쓰면 None 처럼 동작(▶ = 파일 열기). ▶ = 결과 · [원곡] = 원곡(둘 다 처음부터)."""
 
     def __init__(self, parent):
         self.parent = parent
@@ -227,7 +203,6 @@ class Player:
         self.which = ""                         # res | src
         self.mp = None
         self._tried = False
-        self._seek: int | None = None
 
     def _ensure(self):
         """처음 ▶ 를 누를 때 만듦(오디오 장치 준비가 시작을 늦추거나 막지 않게)."""
@@ -243,72 +218,40 @@ class Player:
             self.ao.setVolume(0.9)
             self.mp.setAudioOutput(self.ao)
             self.mp.playbackStateChanged.connect(self._state)
-            self.mp.mediaStatusChanged.connect(self._status)
         except Exception as e:  # noqa: BLE001
             L.warning("미리듣기 못 씀: %s", e)
             self.mp = None
         return self.mp
 
-    def position(self) -> int:
-        return int(self.mp.position()) if self.mp is not None else 0
-
     def toggle(self, row: ResultRow):
-        """▶ = 결과. 같은 줄의 원곡을 듣던 중이면 그 위치에 맞춰 결과로 넘어감."""
-        if self._ensure() is None:
-            open_folder(row.path)
-            return
-        if self.cur is row and self.which == "res":
-            self.stop(reset=True)
-            return
-        pos = row.res_from_src(self.position()) if (self.cur is row and self.which == "src") else 0
-        self._play(row, "res", row.path, pos)
+        self._toggle(row, "res", row.path)
 
     def toggle_src(self, row: ResultRow):
-        """[원곡] = 같은 위치의 원곡. 결과를 듣던 중이면 지금 위치, 아니면 마지막 결과 위치."""
-        if not row.src_path:
-            return
-        if self._ensure() is None:
-            open_folder(row.src_path)
-            return
-        if self.cur is row and self.which == "src":
-            self.stop(reset=True)
-            return
-        if self.cur is row and self.which == "res":
-            row.res_pos = self.position()
-        self._play(row, "src", row.src_path, row.src_pos(row.res_pos))
+        if row.src_path:
+            self._toggle(row, "src", row.src_path)
 
-    def _play(self, row, which, path, pos):
+    def _toggle(self, row, which, path):
+        if self._ensure() is None:
+            open_folder(path)
+            return
+        same = self.cur is row and self.which == which
         self.stop()
+        if same:
+            return
         self.cur, self.which = row, which
-        self._seek = pos if pos > 0 else None
         self.mp.setSource(QUrl.fromLocalFile(path))
         self.mp.play()
-        if self._seek is not None:
-            self.mp.setPosition(self._seek)       # 이미 읽힌 경우 바로 · 아니면 _status 에서 한 번 더
         row.set_playing(which)
 
-    def stop(self, reset: bool = False):
+    def stop(self):
         if self.mp is not None:
-            if self.cur is not None and self.which == "res" and not reset:
-                try:
-                    self.cur.res_pos = self.position()
-                except RuntimeError:
-                    pass
             self.mp.stop()
         if self.cur is not None:
             try:
-                if reset:
-                    self.cur.res_pos = 0
                 self.cur.set_playing("")
             except RuntimeError:
                 pass
-        self.cur, self.which, self._seek = None, "", None
-
-    def _status(self, st):
-        from PySide6.QtMultimedia import QMediaPlayer
-        if self._seek is not None and st in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
-            self.mp.setPosition(self._seek)
-            self._seek = None
+        self.cur, self.which = None, ""
 
     def _state(self, st):
         from PySide6.QtMultimedia import QMediaPlayer
@@ -483,7 +426,7 @@ class WorkWindow(DragMove, QWidget):
         self.a_info.setStyleSheet(f"color:{SUB};")
         self.mood_mode = Seg([("auto", "원곡대로"), ("set", "직접 고르기")], "auto")
         self.mood_mode.changed.connect(self._mood_mode)
-        self.moods = Multi([(k, ko) for k, ko, _ in prompt.MOODS], ["calm"], limit=3, cols=4, min_one=True)
+        self.moods = Multi([(k, ko) for k, ko, _ in prompt.MOODS], ["calm"], limit=prompt.MAX_MOODS, cols=4, min_one=True)
         self.moods.changed.connect(self._moods_changed)
         self.manual_moods = ["calm"]
         self.bpm_mode = Seg([("src", "원곡 템포"), ("set", "직접")], "src")
@@ -500,12 +443,13 @@ class WorkWindow(DragMove, QWidget):
         brow.addWidget(self.bpm)
         return self._body([self.a_info, labeled("분위기", self.mood_mode), labeled("", self.moods),
                            labeled("템포", brow),
-                           self._hint("끄면 분석 없이 고른 악기·분위기만으로 만듭니다(분위기 = 직접 고른 것, 없으면 차분함).")])
+                           self._hint("원곡에서는 템포·조성·분위기만 읽습니다(원곡 소리는 쓰지 않음). 분위기는 2개까지. "
+                                      "끄면 고른 악기·분위기만으로 만듭니다.")])
 
     def _generate_body(self) -> QWidget:
         self.instr = Multi([(k, ko) for k, ko, _ in prompt.INSTRUMENTS], ["piano"], limit=prompt.MAX_INSTR, cols=4)
         self.instr.changed.connect(lambda _v: self._sync())
-        self.instr_note = self._hint("최대 3개까지 · 고른 악기만 쓰도록 엔진에 강하게 지시합니다.")
+        self.instr_note = self._hint("최대 3개까지 함께 쓸 수 있습니다.")
         self.instr.refused.connect(self._instr_refused)
         self.len_mode = Seg([("src", "원곡 길이"), ("set", "직접")], "src")
         self.len_mode.changed.connect(lambda _k: self._sync())
@@ -524,57 +468,38 @@ class WorkWindow(DragMove, QWidget):
         lrow.addWidget(self.len_mode, 1)
         lrow.addWidget(self.secs)
         lrow.addWidget(self.secs_lab)
-        self.slider = QSlider(Qt.Horizontal)          # 원곡 반영 0~100%(5% 단위)
-        self.slider.setRange(0, 20)
-        self.slider.setPageStep(2)
-        self.slider.setValue(prompt.DEFAULT_STRENGTH // 5)
-        self.slider.setStyleSheet(SLIDER_CSS)
-        self.slider.setFocusPolicy(Qt.NoFocus)
-        self.slider.valueChanged.connect(lambda _v: self._sync())
-        self.sl_val = QLabel("")
-        self.sl_val.setFixedWidth(44)
-        self.sl_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        lo, hi = QLabel("0%"), QLabel("100%")
-        for x in (lo, hi):
-            x.setStyleSheet(f"color:{SUB_TXT}; font-size:11px;")
-        srow = QHBoxLayout()
-        srow.setSpacing(8)
-        srow.addWidget(lo)
-        srow.addWidget(self.slider, 1)
-        srow.addWidget(hi)
-        srow.addWidget(self.sl_val)
-        self.str_hint = self._hint("")
         self.cand = Seg([(str(i), f"{i}곡") for i in (1, 2, 3, 4)], str(hw.profile().candidates))
         self.cand.changed.connect(lambda _k: self._sync())
         self.b_test = small_button("악기 시험", 88, 28, "8개 악기를 20초씩 만들어 음질을 비교(원곡 필요 없음)")
         self.b_test.clicked.connect(self.start_test)
         self.b_cmp = small_button("비교 시험", 88, 28,
-                                  f"첫 원곡 기준 {prompt.COMPARE_SECONDS}초를 같은 씨앗으로 최대 4곡(원곡 소리는 쓰지 않음)")
+                                  f"첫 원곡 기준 {prompt.COMPARE_SECONDS}초를 같은 씨앗으로, 모델만 바꿔 가며 만듭니다")
         self.b_cmp.clicked.connect(self.start_compare)
         trow = QHBoxLayout()
         trow.setSpacing(8)
         trow.addWidget(self.b_test)
         trow.addWidget(self.b_cmp)
-        trow.addWidget(self._hint("비교 시험 = 1 지금 방식 · 2 새 지시문 · 3 + 음색 참고 · 4 + 원곡 이해 "
-                                  f"({prompt.COMPARE_SECONDS}초, 같은 씨앗)."), 1)
-        self.ref_audio = ""
+        self.cmp_hint = self._hint("")
+        trow.addWidget(self.cmp_hint, 1)
+        self.refs: list[str] = []
         self.ref_lab = QLabel("")
         self.ref_lab.setStyleSheet(f"color:{SUB};")
         self.ref_lab.setMinimumWidth(1)
         self.ref_lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        b_ref = small_button("선택", 52, 26, "잘 녹음된 실제 악기 연주(예: 좋아하는 피아노 녹음) — 음색·연주 느낌만 참고")
+        b_ref = small_button("선택", 52, 26, f"잘 녹음된 실제 악기 연주 파일(최대 {prompt.MAX_REFS}개) — 음색·연주 느낌만 참고")
         b_ref.clicked.connect(self.pick_ref)
         b_refx = small_button("지움", 52)
-        b_refx.clicked.connect(lambda: self._set_ref(""))
+        b_refx.clicked.connect(lambda: self._set_refs([]))
         rrow = QHBoxLayout()
         rrow.setSpacing(6)
         rrow.addWidget(self.ref_lab, 1)
         rrow.addWidget(b_ref)
         rrow.addWidget(b_refx)
         self._ref_row = labeled("음색 참고", rrow)
+        self.ref_hint = self._hint("선택 사항 · 같은 악기(같은 편성)의 실제 연주 녹음만 넣으세요. 비우면 쓰지 않습니다.")
         return self._body([labeled("악기", self.instr), labeled("", self.instr_note), labeled("길이", lrow),
-                           labeled("원곡 반영", srow), labeled("", self.str_hint),
-                           labeled("후보", self.cand), self._ref_row, trow])
+                           labeled("후보", self.cand), self._ref_row,
+                           labeled("", self.ref_hint), trow])
 
     def _output_body(self) -> QWidget:
         self.fmt = Seg(ff.FORMAT_NAMES, "mp3")
@@ -611,11 +536,10 @@ class WorkWindow(DragMove, QWidget):
         self.instr.set_value(c.get("instruments", ["piano"]) or ["piano"])
         self.len_mode.set_value(c.get("length_mode", "src"))
         self.secs.setValue(int(c.get("seconds", 60)))
-        self.slider.setValue(prompt.strength_pct(c.get("strength", prompt.DEFAULT_STRENGTH)) // 5)   # 옛 low/mid/high → 0/30/60
         self.cand.set_value(str(c.get("candidates", hw.profile().candidates)))
         self.fmt.set_value(c.get("fmt", "mp3"))
         self.out_dir = c.get("out_dir", "")
-        self.ref_audio = c.get("ref_audio", "") if Path(c.get("ref_audio", "") or "_").is_file() else ""
+        self.refs = [f for f in (c.get("refs") or []) if f and Path(f).is_file()][: prompt.MAX_REFS]
         self._mood_mode()
         op = c.get("open", "generate")
         if op in self.stages:
@@ -626,8 +550,8 @@ class WorkWindow(DragMove, QWidget):
         settings.put("work", {
             "analyze_on": p.analyze_on, "mood_mode": self.mood_mode.value(), "moods": self.manual_moods,
             "bpm_mode": p.bpm_mode, "bpm": p.bpm, "instruments": p.instruments, "length_mode": p.length_mode,
-            "seconds": p.seconds, "strength": p.strength, "candidates": p.candidates, "fmt": p.fmt,
-            "out_dir": self.out_dir, "ref_audio": self.ref_audio,
+            "seconds": p.seconds, "candidates": p.candidates, "fmt": p.fmt,
+            "out_dir": self.out_dir, "refs": self.refs,
             "open": next((k for k, s in self.stages.items() if s.open_), ""),
         })
 
@@ -636,20 +560,21 @@ class WorkWindow(DragMove, QWidget):
         moods = list(self.manual_moods) if (self.mood_mode.value() == "set" or not an) else []
         return jobs.Plan(analyze_on=an, moods=moods, bpm_mode=self.bpm_mode.value() if an else "set",
                          bpm=self.bpm.value(), instruments=self.instr.value() or ["piano"],
-                         length_mode=self.len_mode.value(), seconds=self.secs.value(), strength=self.slider.value() * 5,
+                         length_mode=self.len_mode.value(), seconds=self.secs.value(),
                          candidates=int(self.cand.value()), fmt=self.fmt.value(), out_dir=self.out_dir,
-                         title=self.title.text().strip(), ref_audio=self.ref_audio)
+                         title=self.title.text().strip(), refs=list(self.refs))
 
     def _out_dir(self) -> Path:
         return Path(self.out_dir) if self.out_dir else paths.default_out_dir()
 
     def pick_ref(self):
-        f, _ = QFileDialog.getOpenFileName(self, "음색 참고 음원(실제 악기 녹음)", settings.get("last_in", ""), AUDIO_FILTER)
-        if f:
-            self._set_ref(f)
+        fs, _ = QFileDialog.getOpenFileNames(self, f"음색 참고 음원(실제 악기 녹음, 최대 {prompt.MAX_REFS}개)",
+                                             settings.get("last_in", ""), AUDIO_FILTER)
+        if fs:
+            self._set_refs(fs[: prompt.MAX_REFS])
 
-    def _set_ref(self, f):
-        self.ref_audio = f
+    def _set_refs(self, fs):
+        self.refs = list(fs)
         self._sync()
 
     def pick_out(self):
@@ -692,37 +617,27 @@ class WorkWindow(DragMove, QWidget):
     def _sync(self):
         p = self.plan()
         an = self.stages["analyze"]
-        v = p.strength
         self.moods.set_enabled_all(self.mood_mode.value() == "set" or not an.on)
-        self.bpm_mode.setEnabled(v == 0 and an.on)                     # 반영 > 0 = 템포·조성은 원곡 그대로
-        self.bpm.setEnabled(v == 0 and (self.bpm_mode.value() == "set" or not an.on))
+        self.bpm_mode.setEnabled(an.on)
+        self.bpm.setEnabled(self.bpm_mode.value() == "set" or not an.on)
         self.secs.setEnabled(p.length_mode == "set")
         self.secs_lab.setText(mmss(self.secs.value()))
         mood_txt = ("분위기 자동" if not p.moods else " · ".join(prompt.MOOD[m][0] for m in p.moods))
-        if v > 0:
-            an.set_summary(f"{mood_txt} · 템포·조성 = 원곡 그대로")
-        else:
-            an.set_summary(f"{mood_txt} · " + ("원곡 템포" if p.bpm_mode == "src" else f"{p.bpm} BPM"))
+        an.set_summary(f"{mood_txt} · " + ("원곡 템포" if p.bpm_mode == "src" else f"{p.bpm} BPM"))
         len_txt = "원곡 길이" if p.length_mode == "src" else mmss(p.seconds)
-        self.stages["generate"].set_summary(f"{prompt.instr_label(p.instruments)} · {len_txt} · 반영 {v}% · 후보 {p.candidates}")
-        warn = v > prompt.WARN_STRENGTH
-        self.sl_val.setText(f"{v}%")
-        self.sl_val.setStyleSheet(f"color:{WARN if warn else '#e6e6e6'}; font-weight:bold;")
-        if v == 0:
-            t = "원곡 소리는 쓰지 않고 템포·조성·분위기만 참고해 새로 만듭니다(저작권 가장 안전)."
-        elif v <= 40:
-            t = "원곡 흐름을 조금 따르고 나머지는 자유롭게 만듭니다. 템포·조성은 원곡 그대로."
-        elif not warn:
-            t = "원곡의 화음 진행·구조를 대부분 따라가며 악기만 바꿉니다. 템포·조성은 원곡 그대로."
-        else:
-            t = "원곡과 매우 닮습니다. 공개·판매용이면 원곡과 너무 닮지 않았는지 꼭 확인하세요."
-        self.str_hint.setText(t)
-        self.str_hint.setStyleSheet(f"color:{WARN if warn else SUB_TXT}; font-size:11px;")
+        self.stages["generate"].set_summary(f"{prompt.instr_label(p.instruments)} · {len_txt} · 후보 {p.candidates}"
+                                            + (" · 음색 참고" if self.refs else ""))
+        ms = jobs.compare_models()
+        self.cmp_hint.setText(f"비교 시험 = {prompt.COMPARE_SECONDS}초를 같은 씨앗으로, 모델만 바꿔 "
+                              + " / ".join(m[1] for m in ms) + ".")
         cur = self._current()
         self.title.setPlaceholderText("비우면 원곡 이름 첫 단어" + (f" (예: {prompt.first_word(cur.name)})" if cur else ""))
-        self.ref_lab.setText(self.ref_lab.fontMetrics().elidedText(
-            Path(self.ref_audio).name if self.ref_audio else "없음 — 비교 시험 3번은 건너뜀", Qt.ElideMiddle, 250))
-        self.ref_lab.setToolTip(self.ref_audio)
+        if not self.refs:
+            rt = "없음(쓰지 않음)"
+        else:
+            rt = Path(self.refs[0]).name + (f" 외 {len(self.refs) - 1}개" if len(self.refs) > 1 else "")
+        self.ref_lab.setText(self.ref_lab.fontMetrics().elidedText(rt, Qt.ElideMiddle, 250))
+        self.ref_lab.setToolTip("\n".join(self.refs))
         self.out_lab.setText(self.out_lab.fontMetrics().elidedText(str(self._out_dir()), Qt.ElideMiddle, 250))
         self.stages["output"].set_summary((f"{p.title} · " if p.title else "") + f"{p.fmt.upper()} · {self._out_dir().name}")
         # 요약 · 예상 시간
@@ -888,6 +803,19 @@ class WorkWindow(DragMove, QWidget):
         if not self.checked():
             ui_style.notice(self, "비교할 원곡이 없습니다. 원곡을 넣고 체크하세요.")
             return
+        need = [m for m in jobs.compare_models() if not EG.model_ready(m[0])]
+        if need and EG.installed():
+            gb = sum(m[3] for m in need)
+            free = hw.disk_free_gb(EG.checkpoints().parent)
+            names = ", ".join(m[2] for m in need)
+            if free and free < gb + 5:
+                ui_style.notice(self, f"모델을 내려받을 공간이 부족합니다.\n필요 약 {gb}GB · 남은 공간 {free:g}GB")
+                return
+            r = ui_style.confirm(self, f"비교할 모델을 먼저 내려받습니다(처음 한 번).\n{names}\n약 {gb}GB"
+                                 + (f" · 남은 공간 {free:g}GB" if free else ""),
+                                 [("cancel", "취소", 72, None), ("ok", "내려받고 시작", 110, "blue")])
+            if r != "ok":
+                return
         self._run(test=False, compare=True)
 
     def _run(self, test: bool, compare: bool = False):
@@ -956,7 +884,7 @@ class WorkWindow(DragMove, QWidget):
         taskbar.flash(self)
         if ok:
             self.step_bar.finish(msg)
-            self.run_lab.halt(f"완료 · {msg}" + (" · 1~4번을 차례로 들어 보고 어느 것이 나은지 알려 주세요"
+            self.run_lab.halt(f"완료 · {msg}" + (" · 차례로 들어 보고 어느 모델이 나은지 알려 주세요"
                                                 if self._compare else ""))
         else:
             self.run_lab.halt(msg)

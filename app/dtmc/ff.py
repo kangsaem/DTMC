@@ -105,6 +105,23 @@ def make_source(src, dst, seconds: float) -> Path:
     return dst
 
 
+def make_ref(files, dst, total: float = 90.0) -> Path:
+    """음색 참고 음원 1~3개 → 한 파일(각 total/n 초씩 이어 붙임, 짧으면 반복). 48kHz 스테레오 WAV.
+    엔진은 이 파일을 3등분해 앞·중·뒤에서 10초씩 뽑아 음색·연주·녹음 질감만 참고한다."""
+    files = [str(f) for f in files][:3]
+    each = total / max(1, len(files))
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    args = [paths.ffmpeg(), "-v", "error", "-nostdin", "-y"]
+    for f in files:
+        args += ["-stream_loop", "-1", "-t", f"{each:.3f}", "-i", f]
+    chain = "".join(f"[{i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}];" for i in range(len(files)))
+    chain += "".join(f"[a{i}]" for i in range(len(files))) + f"concat=n={len(files)}:v=0:a=1[o]"
+    cp = run(args + ["-filter_complex", chain, "-map", "[o]", "-c:a", "pcm_s16le", str(dst)], timeout=600)
+    _check(cp, "음색 참고 음원 만들기")
+    return dst
+
+
 def convert(src, dst, fmt: str) -> Path:
     ext, codec = FORMATS[fmt]
     dst = Path(dst).with_suffix(ext)

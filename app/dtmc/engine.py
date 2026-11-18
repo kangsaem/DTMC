@@ -434,6 +434,27 @@ def install(on_step, on_line, should_stop) -> None:
     on_line("설치 완료")
 
 
+# ------------------------------------------------------------ 추가 모델(비교 시험)
+def model_ready(model: str) -> bool:
+    """내려받기가 끝난 모델인지(기본 모델 = 설치 때 받음 · 추가 모델 = 끝나면 표시 파일을 둠)."""
+    if external_url() or model == MAIN_MODEL:
+        return True
+    return (checkpoints() / model / ".dtmc_ok").is_file()
+
+
+def download_model(model: str, on_line, should_stop) -> None:
+    """추가 모델 내려받기(ACE-Step model_downloader, 받던 곳부터 이어받음). 실패 = EngineError."""
+    if model_ready(model):
+        return
+    cmd = python_prefix("acestep.model_downloader") + ["--model", model, "--dir", str(checkpoints()), "--skip-main"]
+    L.info("모델 내려받기: %s", model)
+    code = stream(cmd, project(), on_line, should_stop)
+    d = checkpoints() / model
+    if code != 0 or not d.is_dir() or not any(d.iterdir()):
+        raise EngineError(f"모델({model}) 내려받기에 실패했습니다(engine.log 확인). 다시 하면 받던 곳부터 이어받습니다.")
+    (d / ".dtmc_ok").write_text(time.strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
+
+
 # ------------------------------------------------------------ 서버
 def _free_port() -> int:
     s = socket.socket()
@@ -482,6 +503,9 @@ class Engine:
         # ACE-Step 서버 기본 = 모델을 첫 요청 때 읽음(ACESTEP_NO_INIT 기본 true) → /health 의 models_initialized 가
         # 계속 False 라 '엔진 준비 0%'에서 멈춤(v0.1.2 실기). 시작할 때 읽게 함 → 준비되면 바로 생성.
         e["ACESTEP_NO_INIT"] = "false"
+        # 요청의 model 이 지금 읽힌 것과 다르면 서버가 그 모델로 바꿔 읽음(비교 시험의 모델 비교 · 일꾼 1개일 때만 동작)
+        e["ACESTEP_ON_DEMAND_MODEL_LOAD"] = "true"
+        e["ACESTEP_QUEUE_WORKERS"] = e["ACESTEP_API_WORKERS"] = "1"
         # 서버는 참고 음원(src_audio_path) 절대 경로를 '시스템 임시 폴더' 안에서만 받는다
         # (acestep/api/http/release_task_audio_paths.py). → 서버의 임시 폴더 = 엔진 tmp(참고 음원을 두는 곳)
         t = str(tmp_dir())
@@ -508,6 +532,7 @@ class Engine:
         L.info("엔진 시작(%s): %s", pr.label, " ".join(cmd))
         log.engine_line("$ " + " ".join(cmd))
         self.lines = []
+        self.cur_model, self.model_note = MAIN_MODEL, ""
         self.proc = subprocess.Popen(cmd, cwd=str(project()), env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      stdin=subprocess.DEVNULL, creationflags=hw.NO_WINDOW)
         _assign_job(self.proc)
@@ -519,6 +544,10 @@ class Engine:
                     log.engine_line(t)
                     self.lines.append(t)
                     del self.lines[:-200]
+                    if "Model loaded on demand:" in t:                    # 서버가 모델을 바꿔 읽음
+                        self.cur_model = t.rsplit(":", 1)[1].strip()
+                    elif "using primary" in t or "on-demand load of" in t:  # 못 바꿈(조용히 기본 모델로 만듦)
+                        self.model_note = t[-200:]
                     try:
                         on_line(t)
                     except Exception:  # noqa: BLE001
@@ -639,6 +668,10 @@ class Engine:
         q = self._wait(self.submit(req), on_progress, should_stop, timeout, "생성")
         if not q["files"]:
             raise EngineError("생성은 끝났지만 결과 파일이 없습니다.")
+        want = req.get("model")
+        if want and not external_url() and getattr(self, "cur_model", want) != want:
+            # 서버는 모델을 못 바꾸면 말없이 기본 모델로 만든다 → 비교가 틀어지지 않게 여기서 막음
+            raise EngineError(f"모델을 {want} 로 바꾸지 못했습니다(engine.log 확인). {getattr(self, 'model_note', '')}")
         out = []
         for i, f in enumerate(q["files"]):
             qs = urllib.parse.urlparse(f).query
