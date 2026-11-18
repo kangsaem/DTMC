@@ -159,6 +159,45 @@ hw.gpu = real_gpu
 hw._PROFILE = None
 print("style samples ok", len(names))
 
+# 원곡 길이 맞추기(v0.1.13): 마디 단위 재배치 계획 · 편집 · 이음매 다시 그리기 · 커버
+from dtmc import fit  # noqa: E402
+
+long_src = ff.make_test_tone(tmp / "Long Song.wav", 64, 120)          # 마디 2초 × 32
+f = fit.plan_file(long_src, 120, 40)
+assert f.changed() and abs(f.length - 40) < 1.1 and len(f.segments) == 2 and len(f.seams) == 1, f
+assert all(abs(((b - a) / f.bar) - round((b - a) / f.bar)) < 1e-3 for a, b in f.segments[1:-1]) and f.bar == 2.0
+f2 = fit.plan_file(long_src, 120, 90)
+assert abs(f2.length - 90) < 1.1 and len(f2.segments) == 3 and len(f2.seams) == 1, f2      # 한 묶음을 한 번 더 — 건너뛰는 자리는 하나
+assert not fit.plan_file(long_src, 120, 64).changed()
+w0 = fit.repaint_windows(f)
+assert len(w0) == 1 and 3 <= w0[0][1] - w0[0][0] <= 20 and w0[0][0] < f.seams[0] < w0[0][1]
+arr = ff.arrange(long_src, f.segments, tmp / "arr.wav")
+assert abs(ff.duration(arr) - f.length) < 0.1
+hw.gpu = lambda: hw.Gpu("시험 GPU", 24.0, "999.0")
+hw._PROFILE = hw.Profile("gpu", "test", True, "acestep-5Hz-lm-1.7B", True, 2)
+n0 = len(json.loads(urllib.request.urlopen(url + "/_requests").read()))
+plan = jobs.Plan(style="jazz", length_mode="set", seconds=40, out_dir=str(tmp / "fit"), title="Dive")
+res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(long_src))], plan, fit_len=True))
+assert res.get("ok") and len(items) == 4, (res, items)
+names = [Path(i["path"]).name for i in items]
+assert names == ["Dive_길이맞춤1_편집만_40s.mp3", "Dive_길이맞춤2_이음매_40s.mp3", "Dive_길이맞춤3_커버100_40s.mp3",
+                 "Dive_길이맞춤4_커버70_재즈 트리오_40s.mp3"], names
+assert abs(ff.duration(items[0]["path"]) - 40) < 0.2                        # 편집만 = 실제 소리 길이
+fr = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:]
+assert [("und" if r.get("full_analysis_only") else r["task_type"]) for r in fr] == ["und", "repaint", "cover", "cover"], fr
+rp, c1, c2 = fr[1], fr[2], fr[3]
+assert rp["chunk_mask_mode"] == "explicit" and rp["repainting_start"] < f.seams[0] < rp["repainting_end"] and rp["thinking"] is False
+assert rp["prompt"].startswith("A warm and nostalgic")                       # 원곡 묘사(가짜 엔진의 글)
+assert c1["audio_cover_strength"] == 1.0 and c1["cover_noise_strength"] == 0.6 and c1["prompt"] == rp["prompt"]
+assert c2["audio_cover_strength"] == 0.7 and c2["cover_noise_strength"] == 0.15 and c2["prompt"].startswith("Jazz trio")
+assert all(os.path.isabs(r["src_audio_path"]) and "bpm" not in r for r in fr[1:])
+res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(long_src))],
+                                  jobs.Plan(length_mode="set", seconds=64, out_dir=str(tmp / "fit")), fit_len=True))
+assert res.get("ok") is False and "바꿀 것이 없습니다" in res.get("msg", ""), res      # 같은 길이 = 할 일 없음
+hw.gpu = real_gpu
+hw._PROFILE = None
+print("fit ok", names)
+
 # 취소
 os.environ["MOCK_DELAY"] = "30"
 mock_engine.DELAY = 30

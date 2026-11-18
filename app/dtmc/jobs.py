@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from . import analyze, engine as EG, ff, hw, log, paths, prompt, settings
+from . import analyze, engine as EG, ff, fit, hw, log, paths, prompt, settings
 
 L = log.log
 STEP_NAME = {"engine": "엔진 준비", "analyze": "분석", "generate": "생성"}
@@ -138,10 +138,11 @@ class MakeJob(QThread):
     finished_ok = Signal(bool, str)
 
     def __init__(self, eng: EG.Engine, sources: list[Source], plan: Plan, test: bool = False,
-                 compare: bool = False, parent=None):
+                 compare: bool = False, fit_len: bool = False, parent=None):
         """test = 악기 시험 · compare = 비교 시험(첫 원곡 기준 60초, 같은 씨앗으로 모델만 바꿔 가며)."""
         super().__init__(parent)
         self.eng, self.sources, self.plan, self.test, self.compare = eng, list(sources), plan, test, compare
+        self.fit_len = fit_len                     # 원곡 길이 맞추기 시험(편집만 / 이음매 다시 그리기 / 커버 2가지)
         self.cancel = False
         self.failed: list[str] = []                # 비교 시험에서 건너뛴 곡(이유)
         self.outputs: list[Path] = []
@@ -150,7 +151,7 @@ class MakeJob(QThread):
         return self.cancel
 
     def steps(self) -> list[str]:
-        if self.test or self.compare:
+        if self.test or self.compare or self.fit_len:
             return ["engine", "generate"]
         return ["engine", "analyze", "generate"] if self.plan.analyze_on else ["engine", "generate"]
 
@@ -234,6 +235,8 @@ class MakeJob(QThread):
             return self._run_test(out_dir)
         if self.compare:
             return self._run_compare(out_dir)
+        if self.fit_len:
+            return self._run_fit(out_dir)
         srcs = [s for s in self.sources if s.checked and not s.error] or [None]      # 원곡은 선택 사항(없으면 스타일만으로)
         if p.analyze_on:
             real = [s for s in srcs if s is not None]
@@ -417,6 +420,109 @@ class MakeJob(QThread):
                 self.step.emit("generate", (i + 1) / n, f"{head}{ko} 완료")
             if failed and not self.outputs:
                 raise EG.EngineError("스타일 샘플이 모두 실패했습니다: " + " / ".join(failed)[:300])
+            self.failed = failed
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _run_fit(self, out_dir: Path):
+        """원곡 길이 맞추기 시험(v0.1.13): 첫 원곡을 plan.seconds 길이로 재배치한 뒤 4가지로.
+        1 편집만(엔진 안 씀) · 2 이음매 다시 그리기(repaint — 이음매 앞뒤만 새로, 나머지는 원곡 소리) ·
+        3 커버 100%(원곡 스타일 — 전체를 다시 연주) · 4 커버 70%(고른 스타일). 원곡 자체를 쓰는 결과임.
+        한 곡이 실패해도 나머지는 계속."""
+        p = self.plan
+        srcs = [s for s in self.sources if s.checked and not s.error]
+        if not srcs:
+            raise EG.EngineError("길이를 맞출 원곡이 없습니다.")
+        s = srcs[0]
+        if s.analysis is None:
+            s.analysis = analyze.analyze_file(s.path)
+            s.duration = s.analysis.duration
+        target = prompt.clamp_len(p.seconds)
+        self.step.emit("generate", 0.0, f"{s.name} · 반복 구간 찾는 중")
+        f = fit.plan_file(s.path, s.analysis.bpm, target)
+        L.info("길이 맞추기: %s → %.1f초(목표 %.0f) · %s · 구간 %s · 이음매 %s", s.name, f.length, target, f.note,
+               f.segments, f.seams)
+        if not f.changed():
+            raise EG.EngineError(f"원곡 길이({int(s.duration)}초)와 목표 길이({int(target)}초)가 거의 같아 바꿀 것이 없습니다. "
+                                 "'길이'를 직접으로 두고 다른 값을 넣으세요.")
+        work = EG.tmp_dir() / time.strftime("fit_%Y%m%d_%H%M%S")
+        work.mkdir(parents=True, exist_ok=True)
+        st = prompt.STYLE_BY.get(p.style, prompt.STYLE_BY[prompt.DEFAULT_STYLE])
+        model = self.ps["model"]
+        failed = []
+        n = 4
+        sec = f.length
+
+        def save(i, tag, label, wav, req=None, **more):
+            stem = prompt.stem(p.title, s.name, f"길이맞춤{i + 1}", tag, sec)
+            out = ff.convert(wav, unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
+            self.outputs.append(out)
+            self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "label": f"{i + 1}. {label}",
+                            "instr": f.note, "n": 1, "of": 1, "seconds": sec})
+            rec = self._record(req or {}, s, [str(out)], [], sec, s.analysis, kind="fit_length", case=tag,
+                               fit={"segments": f.segments, "seams": f.seams, "note": f.note, "target": target})
+            rec.update(more)
+            write_history(rec)
+            self.step.emit("generate", (i + 1) / n, f"{i + 1}/{n} {label} 완료")
+
+        def gen(i, label, req, sub):
+            t0 = time.monotonic()
+
+            def prog(fr, text):
+                self.step.emit("generate", (i + min(0.95, max(0.0, fr))) / n,
+                               f"{i + 1}/{n} {label} · {int(time.monotonic() - t0)}초")
+            self.step.emit("generate", i / n, f"{i + 1}/{n} {label}")
+            return self.eng.generate(req, work / sub, prog, self.stopped)[0]
+        try:
+            # 1. 편집만
+            self.step.emit("generate", 0.0, f"1/{n} 편집만 · {f.note}")
+            arr = ff.arrange(s.path, f.segments, work / "arranged.wav")
+            save(0, "편집만", "편집만(엔진 안 씀)", arr)
+            # 원곡 묘사(2·3번 지시문) — 작곡 담당이 있을 때만, 못 하면 기본 글
+            cap = ""
+            if hw.profile().thinking and hw.profile().lm_ready:
+                try:
+                    self.step.emit("generate", 1 / n, "원곡 듣고 묘사 쓰는 중")
+                    usrc = ff.make_source(arr, work / "und.wav", min(120.0, max(10.0, sec)))
+                    cap = (self.eng.understand(prompt.understand_request(usrc), lambda a, b: None, self.stopped)
+                           .get("caption") or "").strip()
+                except EG.Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    L.warning("원곡 묘사 실패(기본 글로): %s", e)
+            # 2. 이음매 다시 그리기(이음매마다 차례로)
+            try:
+                cur, req2 = arr, {}
+                wins = fit.repaint_windows(f)
+                if not wins:
+                    raise EG.EngineError("다시 그릴 이음매가 없습니다")
+                for q, (a, b) in enumerate(wins):
+                    if self.cancel:
+                        raise EG.Cancelled("취소했습니다")
+                    req2 = prompt.repaint_request(cur, a, b, cap, model)
+                    cur = gen(1, f"이음매 다시 그리기 {q + 1}/{len(wins)}", req2, f"rp{q + 1}")
+                save(1, "이음매", "이음매 다시 그리기", cur, req2, repaint=wins, understand=cap)
+            except EG.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001
+                L.warning("이음매 다시 그리기 실패: %s", e)
+                failed.append(f"이음매: {e}")
+            # 3. 커버 100%(원곡 스타일) · 4. 커버 70%(고른 스타일)
+            for i, tag, label, c, strength, noise in (
+                    (2, "커버100", "커버 100%(원곡 스타일)", cap, 1.0, 0.6),
+                    (3, f"커버70_{st[1]}", f"커버 70%({st[1]})", (p.caption or "").strip() or st[2], 0.7, 0.15)):
+                if self.cancel:
+                    raise EG.Cancelled("취소했습니다")
+                try:
+                    req = prompt.cover_request(arr, c, strength, noise, model)
+                    save(i, tag, label, gen(i, label, req, f"cv{i}"), req, understand=cap if i == 2 else "")
+                except EG.Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    L.warning("%s 실패: %s", label, e)
+                    failed.append(f"{label}: {e}")
+                    if not self.eng.running() and not EG.external_url():
+                        self.eng.start(lambda t: None, self.stopped, extra_env=self.senv)
             self.failed = failed
         finally:
             shutil.rmtree(work, ignore_errors=True)

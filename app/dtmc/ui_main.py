@@ -287,6 +287,7 @@ class WorkWindow(DragMove, QWidget):
         self.job: jobs.MakeJob | None = None
         self.mode = "setup"                     # setup | run | done
         self._compare = False
+        self._fit = False
         self.cfg = settings.get("work", {}) or {}
         self.player = Player(self)
         self._step_key, self._step_t0 = "", time.monotonic()
@@ -501,10 +502,14 @@ class WorkWindow(DragMove, QWidget):
         self.b_cmp = small_button("스타일 샘플", 96, 28,
                                   f"스타일 {len(prompt.STYLES)}가지를 {prompt.COMPARE_SECONDS}초씩 뽑아 들어 보기(같은 씨앗)")
         self.b_cmp.clicked.connect(self.start_compare)
+        self.b_fit = small_button("길이 맞추기 시험", 118, 28,
+                                  "첫 원곡을 '길이' 칸의 값(직접)에 맞춰 4가지로: 편집만 · 이음매 다시 그리기 · 커버 100% · 커버 70%(고른 스타일)")
+        self.b_fit.clicked.connect(self.start_fit)
         trow = QHBoxLayout()
         trow.setSpacing(8)
         trow.addWidget(self.b_cmp)
-        trow.addWidget(self._hint(f"스타일 {len(prompt.STYLES)}가지를 {prompt.COMPARE_SECONDS}초씩 뽑아 들어 봅니다."), 1)
+        trow.addWidget(self.b_fit)
+        trow.addWidget(self._hint("시험용 — 버튼에 마우스를 올리면 설명."), 1)
         return self._body([labeled("스타일", self.style), labeled("지시문", self.cap), labeled("", crow),
                            labeled("길이", lrow), labeled("후보", self.cand), labeled("음색 참고", rrow), trow])
 
@@ -662,6 +667,7 @@ class WorkWindow(DragMove, QWidget):
         self.b_start.setVisible(self.mode != "run")           # 설정 = [AUTO] · 생성 중 = [취소]만 · 끝 = [폴더 열기][돌아가기]
         self.b_cancel.setVisible(self.mode != "setup")
         self.b_cmp.setEnabled(self.mode == "setup")
+        self.b_fit.setEnabled(self.mode == "setup" and bool(cs))
         if self.mode == "setup":
             self._save_cfg()
 
@@ -792,6 +798,19 @@ class WorkWindow(DragMove, QWidget):
         if self.mode == "setup":
             self._run(test=False, compare=True)
 
+    def start_fit(self):
+        """원곡 길이 맞추기 시험: 첫 원곡을 '길이' 칸의 값으로."""
+        if self.mode != "setup":
+            return
+        cs = self.checked()
+        if not cs:
+            ui_style.notice(self, "길이를 맞출 원곡이 없습니다. 원곡을 넣고 체크하세요.")
+            return
+        if self.len_mode.value() != "set":
+            ui_style.notice(self, "'길이'를 [직접]으로 두고 맞출 길이(초)를 넣은 뒤 다시 누르세요.")
+            return
+        self._run(test=False, fit_len=True)
+
     def _confirm_models(self, compare: bool) -> bool:
         """필요한 모델이 없으면 내려받아도 되는지 묻기(크기 · 남은 공간). 내려받기는 작업 안에서."""
         need = jobs.needed_models(self.plan().quality)
@@ -808,7 +827,7 @@ class WorkWindow(DragMove, QWidget):
                              [("cancel", "취소", 72, None), ("ok", "내려받고 시작", 110, "blue")])
         return r == "ok"
 
-    def _run(self, test: bool, compare: bool = False):
+    def _run(self, test: bool, compare: bool = False, fit_len: bool = False):
         if not self._ensure_engine():
             return
         if not self._confirm_models(compare):
@@ -816,7 +835,7 @@ class WorkWindow(DragMove, QWidget):
         self.player.stop()
         plan = self.plan()
         self._save_cfg()
-        self.job = jobs.MakeJob(self.eng, self.checked(), plan, test=test, compare=compare, parent=self)
+        self.job = jobs.MakeJob(self.eng, self.checked(), plan, test=test, compare=compare, fit_len=fit_len, parent=self)
         self.job.step.connect(self._on_step)
         self.job.item.connect(self._on_item)
         self.job.finished_ok.connect(self._on_done)
@@ -869,6 +888,7 @@ class WorkWindow(DragMove, QWidget):
     def _on_done(self, ok, msg):
         outs = list(self.job.outputs) if self.job is not None else []
         self._compare = bool(self.job is not None and self.job.compare)
+        self._fit = bool(self.job is not None and self.job.fit_len)
         self.job = None
         self.mode = "done"
         self.setWindowTitle(f"DTMC {__version__}")
@@ -876,8 +896,9 @@ class WorkWindow(DragMove, QWidget):
         taskbar.flash(self)
         if ok:
             self.step_bar.finish(msg)
-            self.run_lab.halt(f"완료 · {msg}" + (" · 들어 보고 쓸 만한 스타일을 알려 주세요"
-                                                if self._compare else ""))
+            self.run_lab.halt(f"완료 · {msg}" + (" · 들어 보고 쓸 만한 스타일을 알려 주세요" if self._compare else
+                                                " · 원곡을 그대로 쓴 결과입니다 — 공개 영상이면 원곡 권리를 확인하세요"
+                                                if self._fit else ""))
         else:
             self.run_lab.halt(msg)
             self.run_lab.setStyleSheet(f"color:{WARN};")

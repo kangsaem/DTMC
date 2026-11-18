@@ -286,3 +286,32 @@ def style_stem(title: str, source_name: str, n: int, style_ko: str, seconds) -> 
     """스타일 샘플 파일 이름: [제목]_번호-스타일_길이."""
     t = safe(title.strip()) if title and title.strip() else (first_word(source_name) if source_name else "샘플")
     return f"{t}_{n:02d}-{safe(style_ko)}_{len_tag(seconds)}"
+
+
+# ------------------------------------------------------------ 원곡 길이 맞추기(v0.1.13 시험) — 원곡 소리를 쓰는 요청
+def understand_request(src_path) -> dict:
+    """원곡 이해: 원곡 → 설계도 코드 → 작곡 담당이 묘사·장르·템포·조성을 글로."""
+    return {"full_analysis_only": True, "src_audio_path": str(src_path), "task_type": "text2music",
+            "prompt": "", "lyrics": ""}
+
+
+def edit_request(task: str, src_path, caption: str, model=GEN_MODEL, **extra) -> dict:
+    """원곡 소리를 받는 요청(cover · repaint) 공통. 작곡 담당은 엔진이 스스로 끔. 길이 = 원곡 소리 길이."""
+    req = {"prompt": (caption or "").strip() or "Instrumental music.", "lyrics": "[Instrumental]",
+           "vocal_language": "unknown", "task_type": task, "src_audio_path": str(src_path), "thinking": False,
+           "batch_size": 1, "audio_format": "wav", "inference_steps": 8, "use_cot_caption": False,
+           "use_cot_language": False, "model": model}
+    req.update(extra)
+    return req
+
+
+def repaint_request(src_path, start: float, end: float, caption: str, model=GEN_MODEL) -> dict:
+    """이음매 다시 그리기: start~end 초만 엔진이 새로 만들고 나머지는 원곡 소리 그대로."""
+    return edit_request("repaint", src_path, caption, model, repainting_start=round(float(start), 2),
+                        repainting_end=round(float(end), 2), chunk_mask_mode="explicit")
+
+
+def cover_request(src_path, caption: str, strength: float, noise: float, model=GEN_MODEL) -> dict:
+    """커버: 원곡의 멜로디·구성을 따라 다시 연주. strength = 따르는 단계 비율 · noise = 원곡 소리에서 출발하는 정도."""
+    return edit_request("cover", src_path, caption, model, audio_cover_strength=float(strength),
+                        cover_noise_strength=float(noise))

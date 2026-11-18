@@ -137,6 +137,15 @@ assert w.mode == "setup" and w.b_start.text() == "AUTO"
 assert w.b_start.isVisible() and not w.b_cancel.isVisible()      # 설정 화면 = [AUTO]만
 assert w.b_close.isVisible()                                      # 오른쪽 위 [✕]
 
+# 길이 맞추기 시험 버튼: 원곡 있을 때만 · '길이 = 직접'일 때만 시작
+assert w.b_fit.isEnabled()
+seen = []
+ui_style.notice = lambda _w, m, *a, **k: seen.append(m)
+w.len_mode.set_value("src")
+w.start_fit()
+assert w.mode == "setup" and seen and "직접" in seen[-1], seen
+ui_style.notice = lambda *a, **k: None
+
 # 스타일 샘플(가짜 엔진) → 12줄
 w._set_refs([str(a2), str(a1)])
 assert "Night Drive" in w.ref_lab.text() and "외 1개" in w.ref_lab.text()

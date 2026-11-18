@@ -81,7 +81,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/release_task":
             req = self._body()
             REQUESTS.append(req)
-            if req.get("task_type") == "cover":
+            if req.get("task_type") in ("cover", "repaint") or req.get("full_analysis_only"):
                 sp = req.get("src_audio_path", "")
                 if not os.path.exists(sp):
                     return self._send(wrap(None, 400, "src_audio_path not found"))

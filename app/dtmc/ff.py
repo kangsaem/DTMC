@@ -122,6 +122,29 @@ def make_ref(files, dst, total: float = 90.0) -> Path:
     return dst
 
 
+def arrange(src, segments, dst) -> Path:
+    """원곡의 구간들(시작, 끝)을 차례로 이어 붙임(이음매마다 15ms 페이드로 '딱' 소리 방지). 48kHz 스테레오 WAV."""
+    segs = [(float(a), float(b)) for a, b in segments if float(b) - float(a) > 0.05]
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    n = len(segs)
+    f = 0.015
+    parts = []
+    for i, (a, b) in enumerate(segs):
+        d = b - a
+        fx = f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+        if i > 0:
+            fx += f",afade=t=in:st=0:d={f}"
+        if i < n - 1:
+            fx += f",afade=t=out:st={max(0.0, d - f):.3f}:d={f}"
+        parts.append(fx + f"[s{i}]")
+    chain = ";".join(parts) + ";" + "".join(f"[s{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[o]"
+    cp = run([paths.ffmpeg(), "-v", "error", "-nostdin", "-y", "-i", str(src), "-filter_complex", chain,
+              "-map", "[o]", "-c:a", "pcm_s16le", str(dst)], timeout=900)
+    _check(cp, "원곡 재배치")
+    return dst
+
+
 def convert(src, dst, fmt: str) -> Path:
     ext, codec = FORMATS[fmt]
     dst = Path(dst).with_suffix(ext)
