@@ -51,6 +51,7 @@ else:
     (proj / "pkgx").mkdir(parents=True)
     (vdir / "DTMC.exe").write_text("x")
     (proj / "pkgx" / "__init__.py").write_text("X = 42\n")
+    (proj / "pkgx" / "show.py").write_text("import pkgx, sys\nprint(pkgx.X, pkgx.__file__, sys.argv[1:])\n")
     (proj / "pyproject.toml").write_text('[project]\nname = "pkgx"\nversion = "0.1"\nrequires-python = ">=3.10"\n'
                                          '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n')
     r = subprocess.run([uv, "sync", "-q"], cwd=proj, capture_output=True, text=True,
@@ -72,4 +73,67 @@ else:
         assert "DTMC_engine" in out.stdout and "DTMC_0.1.1" not in out.stdout, out.stdout
         print("relocate ok:", out.stdout.strip())
         assert engine.relocate() is None                  # 이미 밖에 있으면 아무것도 안 함
+        # 실제 엔진처럼 python_prefix 로 모듈 실행(인자 전달까지)
+        engine.reset_python_mode()
+        mode = engine.ensure_python()
+        out = subprocess.run(engine.python_prefix("pkgx.show") + ["--port", "1"], capture_output=True, text=True)
+        assert out.returncode == 0 and out.stdout.startswith("42") and "--port" in out.stdout, (mode, out.stdout, out.stderr)
+        print("prefix ok:", mode)
+        # 직접 연결(boot) 방식도 동작하는지
+        engine._PY_MODE = "boot"
+        out = subprocess.run(engine.python_prefix("pkgx.show") + ["--port", "1"], capture_output=True, text=True)
+        assert out.returncode == 0 and out.stdout.startswith("42") and "--port" in out.stdout, (out.stdout, out.stderr)
+        print("boot ok")
+        engine.reset_python_mode()
+
+# ---- 실사용과 같게: 엔진 폴더 안의 uv 관리 Python 3.11 로 만든 가상 환경을 옮김(윈도우 트램펄린 문제 재현)
+if uv is not None:
+    vdir2 = base / "DTMC_0.1.0"
+    eng2 = vdir2 / "engine"
+    proj2 = eng2 / "ACE-Step-1.5"
+    (proj2 / "pkgx").mkdir(parents=True)
+    (vdir2 / "DTMC.exe").write_text("x")
+    (proj2 / "pkgx" / "__init__.py").write_text("X = 42\n")
+    (proj2 / "pkgx" / "show.py").write_text("import pkgx, sys\nprint(pkgx.X, pkgx.__file__, sys.argv[1:])\n")
+    (proj2 / "pyproject.toml").write_text('[project]\nname = "pkgx"\nversion = "0.1"\nrequires-python = ">=3.10"\n'
+                                          '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n')
+    envm = dict(os.environ, UV_CACHE_DIR=str(base / "uvc"), UV_PYTHON_INSTALL_DIR=str(eng2 / "python"),
+                UV_PYTHON_PREFERENCE="only-managed")
+    r = subprocess.run([uv, "sync", "-q", "--python", "3.11"], cwd=proj2, capture_output=True, text=True, env=envm)
+    if r.returncode != 0:
+        print("SKIP managed-python relocate (uv sync 실패):", r.stderr[-200:])
+    else:
+        (proj2 / "checkpoints" / "acestep-v15-turbo").mkdir(parents=True)
+        (eng2 / "installed.json").write_text("{}")
+        paths.app_dir = lambda: vdir2
+        paths.set_engine_dir(eng2)
+        os.environ["DTMC_RELOCATE_TO"] = str(base / "DTMC_engine2")
+        moved = engine.relocate()
+        assert moved == base / "DTMC_engine2", moved
+        assert not eng2.exists()
+        mode = engine.ensure_python()
+        out = subprocess.run(engine.python_prefix("pkgx.show") + ["--port", "1"], capture_output=True, text=True)
+        assert out.returncode == 0 and out.stdout.startswith("42"), (mode, out.stdout, out.stderr)
+        assert "DTMC_engine2" in out.stdout and "DTMC_0.1.0" not in out.stdout, out.stdout
+        print("managed-python relocate ok:", mode, out.stdout.strip())
+        # v0.1.4 가 옮겨 놓은 고장 상태(home = 끊긴 부 버전 링크, 실행기 = 옛 위치)를 다시 만들고 스스로 고치는지
+        import re as _re
+        venv2 = moved / "ACE-Step-1.5" / ".venv"
+        cfgp = venv2 / "pyvenv.cfg"
+        txt = cfgp.read_text(encoding="utf-8")
+        txt = _re.sub(r"(cpython-\d+\.\d+)\.\d+", r"\1", txt)          # home → 부 버전 링크 이름(없음)
+        cfgp.write_text(txt, encoding="utf-8")
+        if os.name == "nt":
+            bak = venv2 / "Scripts" / "python.uv-trampoline.bak"
+            if bak.exists():
+                shutil.copy2(bak, venv2 / "Scripts" / "python.exe")      # 옛 위치를 적어 둔 uv 실행기로 되돌림
+        else:
+            b = venv2 / "bin" / "python"
+            b.unlink()
+            b.symlink_to(base / "없는곳" / "python3")
+        engine.reset_python_mode()
+        mode = engine.ensure_python()
+        out = subprocess.run(engine.python_prefix("pkgx.show"), capture_output=True, text=True)
+        assert out.returncode == 0 and out.stdout.startswith("42"), (mode, out.stdout, out.stderr)
+        print("heal ok:", mode)
 print("OK test_engine_env")

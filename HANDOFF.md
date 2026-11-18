@@ -1,7 +1,7 @@
 # HANDOFF — DTMC (Desktop Music Composer)
 
 > 새 대화에서 이어서 작업할 때 이 파일을 기준으로 한다.
-> 마지막 갱신: 2026-11-18 · **현재 = v0.1.4 → 사용자 4090 시험 중(v0.1.3 에서 엔진이 모델 읽는 단계까지 진행 확인)**
+> 마지막 갱신: 2026-11-18 · **현재 = v0.1.5 → 사용자 4090 시험 중(v0.1.4 가 엔진을 C:\DTMC_engine 으로 옮긴 뒤 'uv trampoline' 오류 → v0.1.5 가 스스로 고침)**
 
 ## 한 줄 요약
 원곡(일반 음원)을 넣으면 분위기가 비슷한 새 곡을 **피아노 또는 스트링** 연주로, **지정한 길이**만큼 만들어 주는 **윈도우 전용 로컬 프로그램**.
@@ -57,6 +57,8 @@
 - 실행 모드(GPU/CPU) 항상 표시 · 기준 해상도 1920×1080
 
 ## 변경 이력
+- v0.1.5: **실기 버그 — 엔진을 옮긴 뒤 'uv trampoline failed to spawn Python child process'**. 원인 2개: ① 윈도우 uv 가상 환경 python.exe(트램펄린)는 원래 Python 위치를 exe 안에 적어 둠 ② uv 는 python\cpython-3.11-…(부 버전 이름)을 실제 폴더 cpython-3.11.18-… 로 잇는 정션을 만들고 가상 환경 home 이 그 정션을 가리킴(정션은 옛 절대 경로). 수정: home 을 실제 폴더로 · 끊긴 링크 지움 · python.exe 를 표준 venv 실행기(Lib\venv\scripts\nt\venvlauncher.exe, pyvenv.cfg 를 읽음)로 교체 · 그래도 안 되면 원래 Python + site-packages 직접 연결(boot). 엔진 시작 때 점검(ensure_python) → 이미 옮겨진 엔진도 스스로 고침(heal). 시험: 엔진 폴더 안 uv 관리 Python 3.11 가상 환경을 옮겨 실행 · 고장 상태 재현 후 회복.
+  실기 로그에서 확인: 모델 로드 정상(DiT turbo 수 초, flash_attention_2) · LM 1.7B(nano-vllm) 준비에 수 분 걸릴 수 있음 · crash.log 의 0x8001010d 는 윈도우가 처리한 예외 기록(죽은 것 아님).
 - v0.1.4: **종료 정리**: DTMC 자신을 Job Object(KILL_ON_JOB_CLOSE·BREAKAWAY_OK)에 넣음 → 엔진 Python 이 띄운 손자 Python 까지 DTMC 와 함께 꺼짐(`procs.py`). 시작·종료 때 엔진 폴더·옆 DTMC 버전 폴더의 engine·bin\uv.exe 로 도는 남은 프로세스 정리(ctypes EnumProcesses). 탐색기(폴더 열기)는 Job 밖으로. **엔진 옮기기**: 엔진이 DTMC 버전 폴더 안(…\DTMC_x\engine)이면 시작 때 같은 드라이브 \DTMC_engine 으로 이름 바꾸기 + 가상 환경 경로(pyvenv.cfg · *.pth) 고침 → 옛 버전 폴더 삭제 가능(진짜 uv 가상 환경으로 시험). 옆 폴더는 DTMC.exe 있는 것만 봄. **버튼(A안)**: 오른쪽 위 [−][✕](✕ = 종료, 생성 중이면 확인) · 아래 = 설정 [AUTO] / 생성 중 [취소] / 끝 [폴더 열기][돌아가기] · 시작 창으로 돌아가는 길 없앰. **엔진 준비 경과 시간** 표시. **아이콘 = 시작 그림과 같은 사진**(dtmc.ico 16~256px, tools/make_icon.py).
 - v0.1.3: **실기 버그 — '엔진 준비 0%'에서 멈춤**: ACE-Step 서버 기본이 모델을 첫 요청 때 읽음(ACESTEP_NO_INIT 기본 true) → /health models_initialized 가 계속 False. 서버 환경 ACESTEP_NO_INIT=false(시작할 때 읽기). 진행 글에서 서버 접속 기록(GET /health …) 숨김. **엔진 위치 고정**(메모 반영): 새 설치 = C:\DTMC_engine(C: 부족하면 프로그램 드라이브\DTMC_engine) · 설치 위치를 settings(engine_dir, 내 문서\DTMC)에 기억 · 기억이 없으면 고정 위치·이 폴더\engine·옆 버전 폴더\engine 에서 이미 설치된 엔진을 찾아 이어 씀(v0.1.2 이하 설치분 포함). tests/test_engine_env.py 추가.
 - v0.1.2: 시작 그림 = 사용자 제공(미쿠 코스프레 + 베토벤, 1254→800px) + 제목 뒤 어두운 그라데이션. 아이콘은 임시 그대로. **주의: 하츠네 미쿠 = 크립톤 캐릭터 → 상업 배포 전 그림 교체 또는 허락 필요(사용자 확인함, 11/18).**

@@ -149,6 +149,147 @@ def venv_python() -> Path:
     return v / "Scripts" / "python.exe" if os.name == "nt" else v / "bin" / "python"
 
 
+def _venv() -> Path:
+    return project() / ".venv"
+
+
+def _cfg() -> dict:
+    d = {}
+    try:
+        for ln in (_venv() / "pyvenv.cfg").read_text(encoding="utf-8").splitlines():
+            if "=" in ln:
+                k, v = ln.split("=", 1)
+                d[k.strip().lower()] = v.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return d
+
+
+def base_python() -> Path | None:
+    """가상 환경이 기대는 원래 Python(엔진 폴더\\python\\cpython-…\\python.exe)."""
+    home = _cfg().get("home")
+    if not home:
+        return None
+    h = Path(home)
+    for c in ((h / "python.exe", h / "python3", h / "python") if os.name == "nt" else (h / "python3", h / "python")):
+        if c.exists():
+            return c
+    return None
+
+
+def _site_packages() -> Path | None:
+    v = _venv()
+    c = v / "Lib" / "site-packages"
+    if c.is_dir():
+        return c
+    found = sorted(v.glob("lib/python*/site-packages"))
+    return found[0] if found else None
+
+
+def heal() -> None:
+    """이미 옮겨진 엔진(v0.1.4 가 옮긴 것 포함)의 경로 고장 고치기: pyvenv.cfg home 을 실제 Python 폴더로 · 끊긴 링크 지움."""
+    eng = paths.engine_dir()
+    try:
+        n = _fix_venv_paths(eng, eng)
+        _drop_broken_links(eng)
+        if n:
+            L.info("엔진 경로 고침(%d개 파일)", n)
+    except Exception as e:  # noqa: BLE001
+        L.warning("엔진 경로 고치기 실패: %s", e)
+
+
+def repair_launcher() -> bool:
+    """윈도우 uv 가상 환경의 python.exe(트램펄린)는 원래 Python 위치를 exe 안에 적어 둠 → 엔진 폴더를 옮기면 못 찾음
+    ('uv trampoline failed to spawn Python child process'). 표준 Python 의 venv 실행기(pyvenv.cfg 의 home 을 읽음)로 바꿔 끼움
+    → 이후 다시 옮겨도 pyvenv.cfg 만 고치면 됨. 바꿨으면 True."""
+    base = base_python()
+    if base is None:
+        return False
+    if os.name != "nt":                                     # 리눅스·맥: bin/python 이 옛 Python 을 가리키는 링크 → 다시 잇기
+        b = _venv() / "bin" / "python"
+        try:
+            if b.is_symlink() and not b.exists():
+                b.unlink()
+                b.symlink_to(base)
+                return True
+        except OSError as e:
+            L.warning("bin/python 다시 잇기 실패: %s", e)
+        return False
+    nt = base.parent / "Lib" / "venv" / "scripts" / "nt"
+    pairs = [("python.exe", ("venvlauncher.exe", "python.exe")), ("pythonw.exe", ("venvwlauncher.exe", "pythonw.exe"))]
+    done = False
+    for dst_name, srcs in pairs:
+        src = next((nt / s for s in srcs if (nt / s).exists()), None)
+        if src is None:
+            continue
+        dst = _venv() / "Scripts" / dst_name
+        try:
+            if dst.exists():
+                bak = dst.with_suffix(".uv-trampoline.bak")
+                if bak.exists():
+                    bak.unlink()
+                dst.replace(bak)
+            shutil.copy2(src, dst)
+            done = True
+        except OSError as e:
+            L.warning("실행기 바꾸기 실패 %s: %s", dst, e)
+    if done:
+        L.info("가상 환경 실행기를 표준 venv 실행기로 바꿈(%s)", nt)
+    return done
+
+
+_BOOT = ("import site, sys, runpy; site.addsitedir({sp!r}); sys.prefix = sys.exec_prefix = {venv!r}; "
+         "sys.argv[0] = {mod!r}; runpy.run_module({mod!r}, run_name='__main__', alter_sys=True)")
+_PY_MODE = None                                              # "venv" | "boot"
+
+
+def _probe(cmd) -> bool:
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env(), creationflags=hw.NO_WINDOW)
+        if r.returncode != 0:
+            log.engine_line("python 점검 실패: " + (r.stderr or r.stdout).strip()[-300:])
+        return r.returncode == 0
+    except Exception as e:  # noqa: BLE001
+        log.engine_line(f"python 점검 실패: {e}")
+        return False
+
+
+def ensure_python() -> str:
+    """엔진 Python 을 실제로 실행할 수 있게: 가상 환경 python.exe → 안 되면 실행기 바꿔 끼우고 다시 → 그래도 안 되면
+    원래 Python + site-packages 직접 연결(boot). 정한 방식을 돌려줌. 다 안 되면 EngineError."""
+    global _PY_MODE
+    if _PY_MODE:
+        return _PY_MODE
+    check = ["-c", "import sys; print(sys.prefix)"]
+    if _probe([str(venv_python())] + check):
+        _PY_MODE = "venv"
+        return _PY_MODE
+    heal()
+    if _probe([str(venv_python())] + check) or (repair_launcher() and _probe([str(venv_python())] + check)):
+        _PY_MODE = "venv"
+        return _PY_MODE
+    base, sp = base_python(), _site_packages()
+    if base is not None and sp is not None and _probe(
+            [str(base), "-c", f"import site, sys; site.addsitedir({str(sp)!r}); print(sys.prefix)"]):
+        L.info("엔진 Python: 원래 Python + site-packages 직접 연결 방식")
+        _PY_MODE = "boot"
+        return _PY_MODE
+    raise EngineError("엔진 Python 을 실행할 수 없습니다(engine.log 확인). 엔진을 다시 설치해야 할 수 있습니다.")
+
+
+def python_prefix(module: str) -> list[str]:
+    """`python -m module` 에 해당하는 명령 앞부분(ensure_python 이 정한 방식대로)."""
+    mode = ensure_python()
+    if mode == "venv":
+        return [str(venv_python()), "-m", module]
+    return [str(base_python()), "-c", _BOOT.format(sp=str(_site_packages()), venv=str(_venv()), mod=module)]
+
+
+def reset_python_mode() -> None:
+    global _PY_MODE
+    _PY_MODE = None
+
+
 def marker() -> Path:
     return paths.engine_dir() / "installed.json"
 
@@ -363,7 +504,7 @@ class Engine:
         self.base = f"http://127.0.0.1:{port}"
         e = self.server_env()
         pr = self.profile
-        cmd = [str(venv_python()), "-m", "acestep.api_server", "--host", "127.0.0.1", "--port", str(port)]
+        cmd = python_prefix("acestep.api_server") + ["--host", "127.0.0.1", "--port", str(port)]
         L.info("엔진 시작(%s): %s", pr.label, " ".join(cmd))
         log.engine_line("$ " + " ".join(cmd))
         self.lines = []
@@ -504,8 +645,47 @@ def _map_path(text: str, new: Path) -> str:
         return str(new.joinpath("ACE-Step-1.5", *[x for x in parts[k + 1:] if x]))
     for k, x in enumerate(low):
         if x.startswith("cpython-") and k > 0 and low[k - 1] == "python":
-            return str(new.joinpath("python", *[y for y in parts[k:] if y]))
+            real = _real_python_dir(new, parts[k])
+            return str(real.joinpath(*[y for y in parts[k + 1:] if y]))
     return text
+
+
+def _is_link(p: Path) -> bool:
+    try:
+        return p.is_symlink() or bool(getattr(p, "is_junction", lambda: False)())
+    except OSError:
+        return False
+
+
+def _real_python_dir(new: Path, name: str) -> Path:
+    """uv 는 python\\cpython-3.11-…(부 버전 이름)을 실제 폴더 cpython-3.11.18-… 로 잇는 링크(윈도우 = 정션)로 만들고
+    가상 환경은 그 링크를 가리킴. 링크는 옛 위치를 절대 경로로 가리켜 옮기면 끊김 → 실제 폴더를 직접 가리키게."""
+    root = new / "python"
+    cand = root / name
+    if cand.is_dir() and not _is_link(cand):
+        return cand
+    m = re.match(r"(cpython-\d+\.\d+)(-.*)$", name, re.IGNORECASE)
+    if m:
+        hits = sorted(d for d in root.glob(f"{m.group(1)}.*{m.group(2)}") if d.is_dir() and not _is_link(d))
+        if hits:
+            return hits[-1]
+    return cand
+
+
+def _drop_broken_links(new: Path) -> None:
+    """옮긴 엔진의 python 폴더에서 끊긴 링크(옛 위치를 가리키는 부 버전 링크) 지움 — 필요하면 uv 가 다시 만듦."""
+    root = new / "python"
+    if not root.is_dir():
+        return
+    for d in root.iterdir():
+        if _is_link(d) and not d.exists():
+            try:
+                os.unlink(d)
+            except OSError:
+                try:
+                    os.rmdir(d)
+                except OSError as e:
+                    L.warning("끊긴 링크 지우기 실패 %s: %s", d, e)
 
 
 def _fix_venv_paths(new: Path, old: Path) -> int:
@@ -572,6 +752,9 @@ def relocate() -> Path | None:
         L.warning("엔진 옮기기 실패(%s → %s): %s — 그 자리에서 계속 씀", d, target, e)
         return None
     n = _fix_venv_paths(target, d)
+    _drop_broken_links(target)
     paths.set_engine_dir(target)
+    reset_python_mode()
+    repair_launcher()                                       # 윈도우: uv 실행기는 옛 위치를 exe 안에 적어 둠 → 표준 실행기로
     L.info("엔진 옮김: %s → %s (경로 고친 파일 %d개)", d, target, n)
     return target
