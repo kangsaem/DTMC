@@ -110,7 +110,7 @@ rows = w.findChildren(ResultRow)
 assert len(rows) == 4, len(rows)
 for r in rows:
     assert Path(r.path).exists()
-    assert r.b_src.isVisible() and r.src_path
+    assert not r.b_src.isHidden() and r.src_path          # (방금 넣은 줄은 아직 안 그려졌을 수 있어 isVisible 대신)
 
 shot(w, "07_work_done.png")
 assert w.b_cancel.isVisible() and w.b_cancel.text() == "폴더 열기" and w.b_start.text() == "돌아가기"
