@@ -12,6 +12,7 @@ from . import __version__, paths, ui_style
 IMG = 400
 W, H = IMG, IMG + 160
 SIDE_TEXT = "Desktop Music Composer"
+GRAD_W, GRAD_H = IMG // 2, 112                 # 제목 뒤 그라데이션(왼쪽 절반 · 높이 112)
 
 
 class SideText(QWidget):
@@ -61,6 +62,13 @@ class StartWindow(QWidget):
             pm = pm.scaled(round(IMG * dpr), round(IMG * dpr), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
             pm.setDevicePixelRatio(dpr)
             self.img.setPixmap(pm)
+        if not pm.isNull():                    # 제목 뒤 어두운 그라데이션(밝은 그림에서도 흰 글자가 보이게, MOSCO v0.7.92 방식)
+            grad = QWidget(self.img)
+            grad.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            grad.setAttribute(Qt.WA_StyledBackground, True)
+            grad.setGeometry(0, 0, GRAD_W, GRAD_H)
+            grad.setStyleSheet("background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 rgba(20,30,45,235),"
+                               "stop:0.7 rgba(20,30,45,160),stop:1 rgba(20,30,45,0))")
         head = QWidget(self.img)
         head.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         hl = QVBoxLayout(head)
