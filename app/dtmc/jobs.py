@@ -169,6 +169,8 @@ class MakeJob(QThread):
         was = self.eng.running()
 
         def line(t):
+            if '"GET /' in t or '"POST /' in t or "HTTP/1.1" in t:     # 서버 접속 기록은 숨김(엔진 로그에는 남음)
+                return
             self.step.emit("engine", 0.0, t[:120])
         self.eng.start(line, self.stopped)
         if not was:

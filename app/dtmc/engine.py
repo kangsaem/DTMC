@@ -287,6 +287,7 @@ def install(on_step, on_line, should_stop) -> None:
         stream([uv, "cache", "clean"], dst, on_line, lambda: False)
     except Exception as e:  # noqa: BLE001
         L.warning("uv cache clean 실패: %s", e)
+    paths.set_engine_dir(paths.engine_dir())          # 모든 버전이 같은 엔진을 쓰게 기억
     marker().write_text(json.dumps({"commit": ACE_COMMIT, "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                                     "python": PYTHON}, ensure_ascii=False), encoding="utf-8")
     on_line("설치 완료")
@@ -325,6 +326,28 @@ class Engine:
         except Exception:  # noqa: BLE001
             return False
 
+    def server_env(self) -> dict:
+        """엔진 서버 환경 변수(실행 모드·언어 모델·모델 미리 읽기·임시 폴더)."""
+        e = env()
+        pr = self.profile
+        lm_ok = bool(pr.lm_model) and (checkpoints() / pr.lm_model).is_dir()   # 기본 설치 = 1.7B 만 받음
+        e["ACESTEP_INIT_LLM"] = "true" if (pr.init_llm and lm_ok) else "false"
+        if lm_ok:
+            e["ACESTEP_LM_MODEL_PATH"] = pr.lm_model
+        if pr.mode == "cpu":
+            e["ACESTEP_DEVICE"] = "cpu"
+            e["CUDA_VISIBLE_DEVICES"] = ""
+        e["ACESTEP_CONFIG_PATH"] = MAIN_MODEL
+        # ACE-Step 서버 기본 = 모델을 첫 요청 때 읽음(ACESTEP_NO_INIT 기본 true) → /health 의 models_initialized 가
+        # 계속 False 라 '엔진 준비 0%'에서 멈춤(v0.1.2 실기). 시작할 때 읽게 함 → 준비되면 바로 생성.
+        e["ACESTEP_NO_INIT"] = "false"
+        # 서버는 참고 음원(src_audio_path) 절대 경로를 '시스템 임시 폴더' 안에서만 받는다
+        # (acestep/api/http/release_task_audio_paths.py). → 서버의 임시 폴더 = 엔진 tmp(참고 음원을 두는 곳)
+        t = str(tmp_dir())
+        e["TMP"] = e["TEMP"] = e["TMPDIR"] = t
+        e["ACESTEP_DOWNLOAD_SOURCE"] = "auto"
+        return e
+
     def start(self, on_line=lambda t: None, should_stop=lambda: False, timeout: float = 1800.0) -> None:
         if external_url():
             self.base = external_url()
@@ -338,21 +361,8 @@ class Engine:
             raise EngineError("생성 엔진이 아직 설치되지 않았습니다.")
         port = _free_port()
         self.base = f"http://127.0.0.1:{port}"
-        e = env()
+        e = self.server_env()
         pr = self.profile
-        lm_ok = bool(pr.lm_model) and (checkpoints() / pr.lm_model).is_dir()   # 기본 설치 = 1.7B 만 받음
-        e["ACESTEP_INIT_LLM"] = "true" if (pr.init_llm and lm_ok) else "false"
-        if lm_ok:
-            e["ACESTEP_LM_MODEL_PATH"] = pr.lm_model
-        if pr.mode == "cpu":
-            e["ACESTEP_DEVICE"] = "cpu"
-            e["CUDA_VISIBLE_DEVICES"] = ""
-        e["ACESTEP_CONFIG_PATH"] = MAIN_MODEL
-        # 서버는 참고 음원(src_audio_path) 절대 경로를 '시스템 임시 폴더' 안에서만 받는다
-        # (acestep/api/http/release_task_audio_paths.py). → 서버의 임시 폴더 = 엔진 tmp(참고 음원을 두는 곳)
-        t = str(tmp_dir())
-        e["TMP"] = e["TEMP"] = e["TMPDIR"] = t
-        e["ACESTEP_DOWNLOAD_SOURCE"] = "auto"
         cmd = [str(venv_python()), "-m", "acestep.api_server", "--host", "127.0.0.1", "--port", str(port)]
         L.info("엔진 시작(%s): %s", pr.label, " ".join(cmd))
         log.engine_line("$ " + " ".join(cmd))

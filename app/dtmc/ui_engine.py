@@ -9,7 +9,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QVBoxLayout, QWidget)
 
 from . import engine as EG
-from . import hw, log, paths, settings, ui_style
+from . import hw, log, paths, ui_style
 from .ui_widgets import WARN, DragMove, Grip, StepBar, main_button, small_button
 
 L = log.log
@@ -139,7 +139,7 @@ class EngineDialog(DragMove, QDialog):
         p = Path(d)
         if p.name.lower() != "engine" and not (p / "installed.json").exists():
             p = p / "DTMC_engine"
-        settings.put("engine_dir", str(p))
+        paths.set_engine_dir(p)
         self._refresh()
 
     def start(self):

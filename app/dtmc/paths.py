@@ -38,27 +38,77 @@ def plain(p) -> bool:
     return s.isascii() and " " not in s
 
 
+def _has_engine(d: Path) -> bool:
+    return (d / "installed.json").exists() or (d / "ACE-Step-1.5" / ".venv").is_dir()
+
+
+def engine_candidates() -> list[Path]:
+    """이미 설치된 엔진을 찾을 곳: 고정 위치(C:\\DTMC_engine · 프로그램 드라이브\\DTMC_engine) ·
+    이 프로그램 폴더\\engine · 옆 폴더들(다른 버전 폴더)\\engine — v0.1.2 이하는 프로그램 폴더 안에 설치했음."""
+    out = [Path("C:\\DTMC_engine"), Path(app_dir().anchor or "C:\\") / "DTMC_engine", app_dir() / "engine"]
+    try:
+        for sib in sorted(app_dir().parent.iterdir()):
+            if sib.is_dir() and sib != app_dir():
+                out.append(sib / "engine")
+    except Exception:  # noqa: BLE001
+        pass
+    seen, uniq = set(), []
+    for p in out:
+        k = str(p).lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(p)
+    return uniq
+
+
 def _engine_default() -> Path:
-    a = app_dir() / "engine"
-    if plain(a):
-        return a
-    drive = Path(app_dir().anchor or "C:\\")
-    return drive / "DTMC_engine"
+    """새로 설치할 곳 = 버전과 무관한 고정 위치. C: 여유가 부족하면 프로그램이 있는 드라이브\\DTMC_engine."""
+    if os.name != "nt":
+        return app_dir() / "engine"
+    c = Path("C:\\DTMC_engine")
+    try:
+        from . import hw
+        need = 30
+        if hw.disk_free_gb(c) >= need:
+            return c
+        alt = Path(app_dir().anchor or "C:\\") / "DTMC_engine"
+        if hw.disk_free_gb(alt) >= need:
+            return alt
+    except Exception:  # noqa: BLE001
+        pass
+    return c
+
+
+_ENGINE_DIR = None
 
 
 def engine_dir() -> Path:
-    """설정(engine_dir) > 환경 변수 DTMC_ENGINE_DIR > 기본."""
+    """환경 변수 DTMC_ENGINE_DIR > 설정(engine_dir, 모든 버전 공용) > 이미 설치된 곳(찾으면 설정에 기억) > 고정 기본 위치."""
+    global _ENGINE_DIR
     env = os.environ.get("DTMC_ENGINE_DIR")
     if env:
         return Path(env)
-    try:
-        from . import settings
-        s = settings.get("engine_dir", "")
-        if s:
-            return Path(s)
-    except Exception:  # noqa: BLE001
-        pass
-    return _engine_default()
+    if _ENGINE_DIR is not None:
+        return _ENGINE_DIR
+    from . import settings
+    s = settings.get("engine_dir", "")
+    if s:
+        _ENGINE_DIR = Path(s)
+        return _ENGINE_DIR
+    for d in engine_candidates():
+        if _has_engine(d):
+            settings.put("engine_dir", str(d))
+            _ENGINE_DIR = d
+            return d
+    _ENGINE_DIR = _engine_default()
+    return _ENGINE_DIR
+
+
+def set_engine_dir(p) -> None:
+    global _ENGINE_DIR
+    from . import settings
+    _ENGINE_DIR = Path(p)
+    settings.put("engine_dir", str(p))
 
 
 _USER_DIR = None
