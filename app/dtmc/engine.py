@@ -490,3 +490,60 @@ class Engine:
             out.append(self.download(f, Path(dst_dir) / f"cand{i + 1}{ext}"))
         L.info("생성 완료 %d곡 %.1fs", len(out), time.monotonic() - t0)
         return out
+
+
+# ------------------------------------------------------------ 엔진 옮기기(버전 폴더 밖으로)
+def _fix_venv_paths(new: Path, old: Path) -> int:
+    """옮긴 뒤 가상 환경 안의 옛 경로를 새 경로로: pyvenv.cfg(home = 엔진 Python) · *.pth(ACE-Step 소스 위치)."""
+    import glob
+    venv = new / "ACE-Step-1.5" / ".venv"
+    files = [venv / "pyvenv.cfg"]
+    for pat in ("Lib/site-packages/*.pth", "lib/python*/site-packages/*.pth"):
+        files += [Path(f) for f in glob.glob(str(venv / pat))]
+    olds = {str(old), str(old).replace("\\", "/")}
+    n = 0
+    for f in files:
+        try:
+            t = f.read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            continue
+        u = t
+        for o in olds:
+            rep = str(new) if "\\" in o else str(new).replace("\\", "/")
+            u = re.sub(re.escape(o), lambda _m, rep=rep: rep, u, flags=re.IGNORECASE)
+        if u != t:
+            f.write_text(u, encoding="utf-8")
+            n += 1
+    return n
+
+
+def relocate() -> Path | None:
+    """엔진이 DTMC 버전 폴더 안에 있으면 같은 드라이브의 \\DTMC_engine 으로 옮김(이름 바꾸기라 몇 초, 다시 받지 않음).
+    이미 거기 엔진이 있으면 그걸 쓰고 옛 것은 그대로 둠. 실패해도 그 자리에서 계속 씀. 옮긴 곳 또는 None."""
+    from . import procs
+    d = paths.engine_dir()
+    if os.environ.get("DTMC_ENGINE_DIR") or not paths.inside_version_folder(d) or not paths._has_engine(d):
+        return None
+    target = Path(d.anchor or str(d.parent.parent)) / "DTMC_engine"
+    if os.environ.get("DTMC_RELOCATE_TO"):                  # 시험용
+        target = Path(os.environ["DTMC_RELOCATE_TO"])
+    if target.exists():
+        if paths._has_engine(target):
+            L.info("엔진: 고정 위치에 이미 있음 → %s 사용(옛 %s 는 그대로)", target, d)
+            paths.set_engine_dir(target)
+            return target
+        try:
+            target.rmdir()                                  # 빈 폴더면 지우고 진행
+        except OSError:
+            L.warning("엔진 옮기기 건너뜀: %s 가 비어 있지 않음", target)
+            return None
+    procs.kill_under([d])                                   # 옛 실행이 남긴 엔진 프로세스(파일 잠금) 정리
+    try:
+        os.rename(d, target)
+    except OSError as e:
+        L.warning("엔진 옮기기 실패(%s → %s): %s — 그 자리에서 계속 씀", d, target, e)
+        return None
+    n = _fix_venv_paths(target, d)
+    paths.set_engine_dir(target)
+    L.info("엔진 옮김: %s → %s (경로 고친 파일 %d개)", d, target, n)
+    return target

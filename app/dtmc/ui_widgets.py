@@ -81,7 +81,8 @@ def open_folder(path, select: bool = False):
     try:
         if sys.platform == "win32":
             if select:
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(p)])
+                from . import procs
+                procs.launch_outside(["explorer", "/select,", os.path.normpath(p)])   # DTMC 를 꺼도 탐색기는 남게
             else:
                 os.startfile(p)                                           # noqa: S606
         elif sys.platform == "darwin":

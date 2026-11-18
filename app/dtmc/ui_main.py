@@ -239,7 +239,6 @@ class Panel(QWidget):
 
 # ------------------------------------------------------------ 작업 창
 class WorkWindow(DragMove, QWidget):
-    closed_to_start = Signal()
 
     def __init__(self, eng: EG.Engine):
         super().__init__(None, Qt.Window | Qt.FramelessWindowHint | Qt.WindowMinimizeButtonHint)
@@ -255,6 +254,11 @@ class WorkWindow(DragMove, QWidget):
         self.mode = "setup"                     # setup | run | done
         self.cfg = settings.get("work", {}) or {}
         self.player = Player(self)
+        self._step_key, self._step_t0 = "", time.monotonic()
+        self._ticker = QTimer(self)
+        self._ticker.setInterval(1000)
+        self._ticker.timeout.connect(self._tick)
+        self._ticker.start()
         self._build()
         self._load_cfg()
         self._sync()
@@ -354,8 +358,9 @@ class WorkWindow(DragMove, QWidget):
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.addWidget(Grip(), 1)
-        b_min = QPushButton_min(self)
-        top.addWidget(b_min)
+        top.addWidget(QPushButton_min(self))
+        self.b_close = QPushButton_close(self)
+        top.addWidget(self.b_close)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 8, 16, 14)
         lay.setSpacing(8)
@@ -575,7 +580,9 @@ class WorkWindow(DragMove, QWidget):
             else:
                 self.state_lab.setText("생성 엔진 설치 필요 — [AUTO]를 누르면 먼저 설치합니다(처음 한 번).")
                 self.state_lab.setStyleSheet(f"color:{WARN};")
-        self.b_start.setEnabled(self.mode != "run" and (bool(cs) or self.mode == "done"))
+        self.b_start.setEnabled(self.mode == "done" or bool(cs))
+        self.b_start.setVisible(self.mode != "run")           # 설정 = [AUTO] · 생성 중 = [취소]만 · 끝 = [폴더 열기][돌아가기]
+        self.b_cancel.setVisible(self.mode != "setup")
         self.b_test.setEnabled(self.mode == "setup")
         if self.mode == "setup":
             self._save_cfg()
@@ -724,6 +731,7 @@ class WorkWindow(DragMove, QWidget):
         self.job.finished_ok.connect(self._on_done)
         self._clear_results()
         self.step_bar.set_steps(self.job.steps())
+        self._step_key, self._step_t0 = "", time.monotonic()
         self.mode = "run"
         self.rw.setVisible(False)
         self.run_w.setVisible(True)
@@ -735,8 +743,18 @@ class WorkWindow(DragMove, QWidget):
         self._sync()
         self.job.start()
 
+    def _tick(self):
+        """1초마다: 엔진 준비 중이면 막대 글에 경과 시간(진행률을 알 수 없는 단계라 멈춘 게 아님을 보여 줌)."""
+        if self.mode != "run":
+            return
+        k = getattr(self, "_step_key", "")
+        if k == "engine":
+            self.step_bar.set("engine", 0.0, f"경과 {mmss(time.monotonic() - self._step_t0)}")
+
     def _on_step(self, key, frac, text):
-        self.step_bar.set(key, frac, "")
+        if key != getattr(self, "_step_key", ""):
+            self._step_key, self._step_t0 = key, time.monotonic()
+        self.step_bar.set(key, frac, f"경과 {mmss(time.monotonic() - self._step_t0)}" if key == "engine" else "")
         if text:
             self.run_lab.run(text)
         f = self.step_bar.frac()
@@ -808,15 +826,39 @@ class WorkWindow(DragMove, QWidget):
             return
         if self.mode == "done":
             self._open_outputs()
-            return
-        # 설정 화면 [취소] = 넣은 원곡 버리고 시작 창으로(DTME 와 같음)
-        self.player.stop()
-        self.clear_sources()
-        self.hide()
-        self.closed_to_start.emit()
 
     def busy(self) -> bool:
         return self.mode == "run"
+
+    def request_quit(self):
+        """[✕]: 생성 중이면 확인 → 멈추고 종료. 엔진·하위 프로세스는 종료 정리(main._cleanup)가 끔."""
+        if self.mode == "run":
+            r = ui_style.confirm(self, "생성 중입니다. 멈추고 끌까요?", [("cancel", "계속", 72, None), ("quit", "끄기", 80, "red")])
+            if r != "quit":
+                return
+            if self.job is not None:
+                self.job.cancel = True
+        self.player.stop()
+        self.hide()
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance().quit()
+
+    def closeEvent(self, e):
+        e.ignore()
+        self.request_quit()
+
+
+def QPushButton_close(win) -> QWidget:
+    """작업 창 오른쪽 위 [✕] = 프로그램 종료(생성 중이면 묻고 멈춤)."""
+    from PySide6.QtWidgets import QPushButton
+    b = QPushButton("✕")
+    b.setToolTip("종료")
+    b.setFocusPolicy(Qt.NoFocus)
+    b.setFixedSize(26, 22)
+    b.setStyleSheet("QPushButton{color:#ddd; background:transparent; border:none; font-size:14px;}"
+                    "QPushButton:hover{background:#c0392b; color:#fff;}")
+    b.clicked.connect(win.request_quit)
+    return b
 
 
 def QPushButton_min(win) -> QWidget:

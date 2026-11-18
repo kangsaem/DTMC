@@ -1,4 +1,4 @@
-"""임시 시작 그림(assets/start.png 800×800)·아이콘(assets/dtmc.ico) 만들기 — 사용자 그림을 받으면 교체.
+"""(v0.1.4 부터 안 씀 — 시작 그림·아이콘 = 사용자 제공 사진. 아이콘은 tools/make_icon.py) 임시 시작 그림(assets/start.png 800×800)·아이콘(assets/dtmc.ico) 만들기 — 사용자 그림을 받으면 교체.
 python tools/make_placeholder.py"""
 import math
 import os

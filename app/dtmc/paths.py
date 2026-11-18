@@ -44,11 +44,11 @@ def _has_engine(d: Path) -> bool:
 
 def engine_candidates() -> list[Path]:
     """이미 설치된 엔진을 찾을 곳: 고정 위치(C:\\DTMC_engine · 프로그램 드라이브\\DTMC_engine) ·
-    이 프로그램 폴더\\engine · 옆 폴더들(다른 버전 폴더)\\engine — v0.1.2 이하는 프로그램 폴더 안에 설치했음."""
+    이 프로그램 폴더\\engine · 옆 DTMC 버전 폴더\\engine — v0.1.2 이하는 프로그램 폴더 안에 설치했음."""
     out = [Path("C:\\DTMC_engine"), Path(app_dir().anchor or "C:\\") / "DTMC_engine", app_dir() / "engine"]
     try:
         for sib in sorted(app_dir().parent.iterdir()):
-            if sib.is_dir() and sib != app_dir():
+            if sib.is_dir() and sib != app_dir() and (sib / "DTMC.exe").exists():   # 다른 DTMC 버전 폴더만
                 out.append(sib / "engine")
     except Exception:  # noqa: BLE001
         pass
@@ -102,6 +102,11 @@ def engine_dir() -> Path:
             return d
     _ENGINE_DIR = _engine_default()
     return _ENGINE_DIR
+
+
+def inside_version_folder(d: Path) -> bool:
+    """엔진이 어떤 DTMC 버전 폴더 안(…\\DTMC_0.1.1\\engine)에 있는지 — 그러면 그 버전 폴더를 못 지움."""
+    return d.name.lower() == "engine" and ((d.parent / "DTMC.exe").exists() or (d.parent / "_internal").is_dir())
 
 
 def set_engine_dir(p) -> None:

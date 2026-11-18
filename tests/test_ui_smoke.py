@@ -87,7 +87,9 @@ os.environ["DTMC_ENGINE_URL"] = url
 w.out_dir = str(tmp / "out")
 w._sync()
 w.start()
-pump(1.2)
+pump(0.3)
+assert w.b_cancel.isVisible() and not w.b_start.isVisible()      # 생성 중 = [취소]만
+pump(0.9)
 shot(w, "06_work_running.png")
 for _ in range(600):
     pump(0.05)
@@ -101,11 +103,10 @@ assert len(rows) == 4, len(rows)
 for r in rows:
     assert Path(r.path).exists()
 shot(w, "07_work_done.png")
+assert w.b_cancel.isVisible() and w.b_cancel.text() == "폴더 열기" and w.b_start.text() == "돌아가기"
 w.back_to_setup()
 assert w.mode == "setup" and w.b_start.text() == "AUTO"
-# [취소] = 시작 창으로
-w.cancel()
-pump(0.3)
-assert not w.isVisible() and a.start.isVisible() and not w.sources
+assert w.b_start.isVisible() and not w.b_cancel.isVisible()      # 설정 화면 = [AUTO]만
+assert w.b_close.isVisible()                                      # 오른쪽 위 [✕]
 print("OK test_ui_smoke")
 os._exit(0)

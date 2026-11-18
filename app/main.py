@@ -35,12 +35,6 @@ class App:
         self.eng = engine.Engine()
         self.start = StartWindow(self.open_work)
         self.work = WorkWindow(self.eng)
-        self.work.closed_to_start.connect(self.show_start)
-
-    def show_start(self):
-        from dtmc.ui_widgets import bring_front
-        self.start.show()
-        bring_front(self.start)
 
     def open_work(self, files):
         from dtmc.ui_widgets import bring_front
@@ -70,8 +64,10 @@ def main():
     from dtmc import single
     if not single.acquire("DTMC", skip=selftest):
         _hard_exit(0)
-    from dtmc import log, paths
+    from dtmc import log, paths, procs
     log.setup()
+    procs.join_job()                          # DTMC 가 어떻게 끝나든 엔진·uv·ffmpeg 가 같이 꺼지게
+    _prepare_engine()
     ico = paths.asset("dtmc.ico")
     if ico.exists():
         app.setWindowIcon(QIcon(str(ico)))
@@ -94,6 +90,18 @@ def main():
     code = app.exec()
     _cleanup(a)
     _hard_exit(code if isinstance(code, int) else 0)
+
+
+def _prepare_engine():
+    """시작 때: 이전 실행이 남긴 엔진 프로세스 정리 → 엔진이 버전 폴더 안이면 \\DTMC_engine 으로 옮김."""
+    from dtmc import engine, log, procs
+    try:
+        n = procs.cleanup_leftovers()
+        if n:
+            log.log.info("이전 실행이 남긴 프로세스 %d개 정리", n)
+        engine.relocate()
+    except Exception:  # noqa: BLE001
+        log.log.exception("엔진 준비(정리·옮기기) 실패")
 
 
 def _selftest(a):
@@ -149,8 +157,10 @@ def _cleanup(a):
     except Exception:  # noqa: BLE001
         pass
     try:
-        from dtmc import ff
+        from dtmc import engine, ff, paths, procs
         ff.kill_all()
+        procs.kill_under([paths.engine_dir()])          # 엔진 Python 이 띄운 Python 까지(손자 프로세스)
+        engine.kill_tree(a.eng.proc)
     except Exception:  # noqa: BLE001
         pass
 
