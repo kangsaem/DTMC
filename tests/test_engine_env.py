@@ -69,7 +69,7 @@ else:
         py = engine.venv_python()
         out = subprocess.run([str(py), "-c", "import pkgx, sys; print(pkgx.X, pkgx.__file__)"], capture_output=True, text=True)
         assert out.returncode == 0 and out.stdout.startswith("42"), (out.stdout, out.stderr)
-        assert str(moved) in out.stdout, out.stdout
+        assert "DTMC_engine" in out.stdout and "DTMC_0.1.1" not in out.stdout, out.stdout
         print("relocate ok:", out.stdout.strip())
         assert engine.relocate() is None                  # 이미 밖에 있으면 아무것도 안 함
 print("OK test_engine_env")

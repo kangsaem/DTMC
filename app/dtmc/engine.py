@@ -493,27 +493,55 @@ class Engine:
 
 
 # ------------------------------------------------------------ 엔진 옮기기(버전 폴더 밖으로)
+def _map_path(text: str, new: Path) -> str:
+    """옛 엔진 안의 경로 하나를 새 엔진 경로로 — 글자 비교가 아니라 구조로(윈도우 짧은 이름 RUNNER~1·대소문자가 달라도 됨).
+    ...\\ACE-Step-1.5\\나머지 → 새\\ACE-Step-1.5\\나머지 · ...\\python\\cpython-…\\나머지 → 새\\python\\cpython-…\\나머지."""
+    t = text.strip()
+    parts = re.split(r"[\\/]+", t)
+    low = [x.lower() for x in parts]
+    if "ace-step-1.5" in low:
+        k = low.index("ace-step-1.5")
+        return str(new.joinpath("ACE-Step-1.5", *[x for x in parts[k + 1:] if x]))
+    for k, x in enumerate(low):
+        if x.startswith("cpython-") and k > 0 and low[k - 1] == "python":
+            return str(new.joinpath("python", *[y for y in parts[k:] if y]))
+    return text
+
+
 def _fix_venv_paths(new: Path, old: Path) -> int:
-    """옮긴 뒤 가상 환경 안의 옛 경로를 새 경로로: pyvenv.cfg(home = 엔진 Python) · *.pth(ACE-Step 소스 위치)."""
+    """옮긴 뒤 가상 환경 안의 옛 경로를 새 경로로: pyvenv.cfg 의 home(엔진 Python) · *.pth 의 경로 줄(ACE-Step 소스 위치)."""
     import glob
     venv = new / "ACE-Step-1.5" / ".venv"
-    files = [venv / "pyvenv.cfg"]
-    for pat in ("Lib/site-packages/*.pth", "lib/python*/site-packages/*.pth"):
-        files += [Path(f) for f in glob.glob(str(venv / pat))]
-    olds = {str(old), str(old).replace("\\", "/")}
     n = 0
-    for f in files:
+    cfg = venv / "pyvenv.cfg"
+    try:
+        lines = cfg.read_text(encoding="utf-8").splitlines()
+        out = []
+        for ln in lines:
+            if "=" in ln and ln.split("=", 1)[0].strip().lower() in ("home", "base-executable", "base-prefix", "base-exec-prefix"):
+                k, v = ln.split("=", 1)
+                nv = _map_path(v, new)
+                if nv != v:
+                    ln = f"{k.rstrip()} = {nv}"
+            out.append(ln)
+        if out != lines:
+            cfg.write_text("\n".join(out) + "\n", encoding="utf-8")
+            n += 1
+    except Exception as e:  # noqa: BLE001
+        L.warning("pyvenv.cfg 고치기 실패: %s", e)
+    pths = []
+    for pat in ("Lib/site-packages/*.pth", "lib/python*/site-packages/*.pth"):
+        pths += [Path(f) for f in glob.glob(str(venv / pat))]
+    for f in pths:
         try:
-            t = f.read_text(encoding="utf-8")
+            lines = f.read_text(encoding="utf-8").splitlines()
         except Exception:  # noqa: BLE001
             continue
-        u = t
-        for o in olds:
-            rep = str(new) if "\\" in o else str(new).replace("\\", "/")
-            u = re.sub(re.escape(o), lambda _m, rep=rep: rep, u, flags=re.IGNORECASE)
-        if u != t:
-            f.write_text(u, encoding="utf-8")
+        out = [ln if ln.startswith(("import ", "#")) or not ln.strip() else _map_path(ln, new) for ln in lines]
+        if out != lines:
+            f.write_text("\n".join(out) + "\n", encoding="utf-8")
             n += 1
+    del old
     return n
 
 
