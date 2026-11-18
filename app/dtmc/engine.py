@@ -318,9 +318,10 @@ class Engine:
         return self.proc is not None and self.proc.poll() is None
 
     def _health(self, timeout=3.0) -> bool:
+        """서버가 떠 있고 모델까지 읽었는지(models_initialized 가 False 면 아직)."""
         try:
-            d = self._get("/health", timeout)
-            return (d or {}).get("status") == "ok"
+            d = self._get("/health", timeout) or {}
+            return d.get("status") == "ok" and d.get("models_initialized", True) is not False
         except Exception:  # noqa: BLE001
             return False
 
@@ -339,13 +340,18 @@ class Engine:
         self.base = f"http://127.0.0.1:{port}"
         e = env()
         pr = self.profile
-        e["ACESTEP_INIT_LLM"] = "true" if pr.init_llm else "false"
-        if pr.lm_model:
+        lm_ok = bool(pr.lm_model) and (checkpoints() / pr.lm_model).is_dir()   # 기본 설치 = 1.7B 만 받음
+        e["ACESTEP_INIT_LLM"] = "true" if (pr.init_llm and lm_ok) else "false"
+        if lm_ok:
             e["ACESTEP_LM_MODEL_PATH"] = pr.lm_model
         if pr.mode == "cpu":
             e["ACESTEP_DEVICE"] = "cpu"
             e["CUDA_VISIBLE_DEVICES"] = ""
         e["ACESTEP_CONFIG_PATH"] = MAIN_MODEL
+        # 서버는 참고 음원(src_audio_path) 절대 경로를 '시스템 임시 폴더' 안에서만 받는다
+        # (acestep/api/http/release_task_audio_paths.py). → 서버의 임시 폴더 = 엔진 tmp(참고 음원을 두는 곳)
+        t = str(tmp_dir())
+        e["TMP"] = e["TEMP"] = e["TMPDIR"] = t
         e["ACESTEP_DOWNLOAD_SOURCE"] = "auto"
         cmd = [str(venv_python()), "-m", "acestep.api_server", "--host", "127.0.0.1", "--port", str(port)]
         L.info("엔진 시작(%s): %s", pr.label, " ".join(cmd))

@@ -102,6 +102,17 @@ class Profile:
     candidates: int           # 후보 기본값
     warn: str = ""            # 주의(드라이버 낮음·메모리 적음 등)
 
+    @property
+    def lm_ready(self) -> bool:
+        """언어 모델을 실제로 켤 수 있는지(설치된 모델이 있어야 함)."""
+        if not (self.init_llm and self.lm_model):
+            return False
+        try:
+            from . import engine
+            return (engine.checkpoints() / self.lm_model).is_dir() or bool(engine.external_url())
+        except Exception:  # noqa: BLE001
+            return False
+
 
 _PROFILE: Profile | None = None
 

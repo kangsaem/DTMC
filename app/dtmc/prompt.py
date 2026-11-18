@@ -87,5 +87,5 @@ def request(*, instr_keys, mood_keys, seconds, bpm=None, key_scale="", strength=
         req["audio_cover_strength"] = cs
     else:
         req["task_type"] = "text2music"
-        req["thinking"] = bool(profile.thinking) if profile is not None else False
+        req["thinking"] = bool(profile.thinking and profile.lm_ready) if profile is not None else False
     return req

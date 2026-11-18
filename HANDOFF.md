@@ -1,7 +1,7 @@
 # HANDOFF — DTMC (Desktop Music Composer)
 
 > 새 대화에서 이어서 작업할 때 이 파일을 기준으로 한다.
-> 마지막 갱신: 2026-11-18 · 현재 = 0단계(준비) · 코드 없음
+> 마지막 갱신: 2026-11-18 · **현재 = v0.1.1 (v0.1.0 첫 코드 + ACE-Step 코드 대조 수정) → 윈도우 빌드 성공 → 사용자 4090 실행 대기**
 
 ## 한 줄 요약
 원곡(일반 음원)을 넣으면 분위기가 비슷한 새 곡을 **피아노 또는 스트링** 연주로, **지정한 길이**만큼 만들어 주는 **윈도우 전용 로컬 프로그램**.
@@ -33,10 +33,11 @@
 | 화면 | Python 3.12 + PySide6 6.12 (Fusion + 어두운 팔레트, 글꼴 지정 없음) |
 | 버튼 모양 | DTME `app/dtme/ui_style.py` 그대로 복사 (기준서 DTME `design/BUTTON_UI.md`) |
 | 공용 부품 | MOSCO `app/mosco/single.py`(하나만 실행) · `taskbar.py`(작업 표시줄 진행) 복사 |
-| 원곡 분석 | librosa (템포·조성·길이·에너지) |
+| 원곡 분석 | numpy 자체 구현(`analyze.py`, 추가 라이브러리 없음): 템포(onset 자기상관)·조성(크로마 + Krumhansl)·크기·밝기 → 분위기 |
 | 형식 변환 | ffmpeg (BtbN 빌드, DTME·MOSCO와 같게) |
 | 빌드 | GitHub Actions(windows-latest) + PyInstaller onedir, 결과 `DTMC-<버전>-windows` (DTME·MOSCO `build.yml` 참고) |
-| 엔진 설치 | 첫 실행 때 uv로 PyTorch GPU판 + ACE-Step 환경과 모델 다운로드 → 프로그램 폴더 안 `engine/`(제안) |
+| 엔진 설치 | 첫 [AUTO] 때 설치 창: engine_src(ACE-Step 고정 커밋 `ca1e85f`)를 엔진 폴더로 복사 → `uv sync --frozen --python 3.11` → `python -m acestep.model_downloader` → `uv cache clean` → installed.json |
+| 엔진 실행 | 엔진 폴더 Python 으로 ACE-Step REST API 서버(127.0.0.1 빈 포트) → `/release_task` · `/query_result` · `/v1/audio`. 윈도우 Job Object 로 DTMC 와 함께 종료 |
 
 - GPU판 PyTorch는 NVIDIA가 없으면 CPU로 동작 → 패키지 1종으로 두 기기 지원
 - 버전 = `app/dtmc/__init__.py` 의 `__version__`
@@ -55,6 +56,42 @@
 6. 첫 실행: 엔진·모델 다운로드 창(한 번만, 디스크 공간 확인·이어받기)
 - 실행 모드(GPU/CPU) 항상 표시 · 기준 해상도 1920×1080
 
+## 변경 이력
+- v0.1.1: ACE-Step 서버는 참고 음원 절대 경로를 '시스템 임시 폴더' 안만 받음(release_task_audio_paths.py) → 서버 TMP/TEMP/TMPDIR = 엔진 tmp(원곡 반영 중간·높음이 400 오류 나던 것). /health 의 models_initialized 까지 기다림. 언어 모델은 설치된 것만 켬. 가짜 엔진도 같은 경로 규칙.
+- v0.1.0: 첫 코드(빌드 44220387072 성공 · 시험 2개 · exe 자체 점검 통과 · 아티팩트 218MB)
+
+## 코드 구조 (v0.1.x)
+```
+app/main.py            진입점(하나만 실행 · 어두운 팔레트 · 시작 창↔작업 창 · DTMC_SELFTEST)
+app/dtmc/paths.py      프로그램·엔진·사용자 폴더(내 문서\DTMC) · bin 도구(ffmpeg·ffprobe·uv)
+app/dtmc/hw.py         nvidia-smi·RAM·CPU → 실행 모드(GPU 고품질 / CPU 경량), 드라이버 570 미만 경고
+app/dtmc/ff.py         ffmpeg: 분석용 PCM · 참고 음원(목표 길이로 반복·자르기) · 형식 변환 · 시험 음원
+app/dtmc/analyze.py    원곡 분석(numpy)
+app/dtmc/prompt.py     악기 8 · 분위기 7 · 원곡 반영(낮음 = text2music / 중간 0.3 · 높음 0.6 = cover) → API 요청
+app/dtmc/engine.py     엔진 설치·서버·요청(ACE_COMMIT 고정 — build.yml 과 같게)
+app/dtmc/jobs.py       분석 스레드 · 생성 스레드(엔진 준비 → 분석 → 생성·저장) · 악기 시험 · 작업 기록 · 속도 기억(예상 시간)
+app/dtmc/ui_start.py   시작 창(DTME Launcher 틀)
+app/dtmc/ui_main.py    작업 창(DTME 자동 창 틀: 원곡 목록 + 단계 줄 분석·생성·출력 + 결과 줄 미리듣기)
+app/dtmc/ui_engine.py  엔진 설치 창
+app/dtmc/ui_widgets.py Seg · Multi · StageRow · StepBar · Grip 등(DTME 모양)
+app/dtmc/ui_style.py · single.py · taskbar.py   DTME·MOSCO 에서 그대로 복사(손대지 말 것)
+tests/mock_engine.py   가짜 ACE-Step API(사인파) — DTMC_ENGINE_URL 로 연결
+tests/test_pipeline.py 분석 → 생성 → 5형식 저장 · 악기 시험 · 취소
+tests/test_ui_smoke.py 화면 그리기(ui_shots/) + [AUTO] 실제 실행
+tools/make_placeholder.py  임시 시작 그림·아이콘(사용자 그림 받으면 assets/start.png 800×800 · dtmc.ico 교체)
+```
+- 환경 변수: `DTMC_ENGINE_URL`(가짜 엔진) · `DTMC_ENGINE_DIR` · `DTMC_USER_DIR` · `DTMC_FORCE_CPU=1` · `DTMC_SELFTEST=1` · `DTMC_JOB=0`
+- 빌드: push → GitHub Actions(windows) → 아티팩트 `DTMC-<버전>-windows`(bin: ffmpeg·ffprobe·uv, engine_src, assets, LICENSES)
+- 여기(Claude 작업 환경)서 확인한 것: 분석(합성음 템포·조성 맞음), 가짜 엔진으로 전체 흐름·5형식·취소, 화면 캡처, 엔진 설치가 uv sync 단계까지 진행(이후 PyTorch 다운로드는 이 환경 네트워크 차단으로 못 함)
+- **못 본 것: 실제 ACE-Step 생성(GPU·윈도우·모델 다운로드), 실제 음질, 노트북 CPU 속도**
+
+## 사용자 시험 순서(v0.1.0)
+1. Actions 아티팩트 받아 압축 풀기(영문 경로 권장, 예: `D:\DTMC`)
+2. DTMC.exe → [AUTO] → 생성 단계 [악기 시험] → 엔진 설치 창 → [설치 시작](수십 분)
+3. 설치 끝나면 악기 8개 × 20초 → 음질 판단(1단계 관문)
+4. 원곡 넣고 [AUTO] → 결과 확인
+5. 문제 생기면 `내 문서\DTMC\logs` 의 dtmc.log · engine.log 공유
+
 ## 하드웨어별 동작
 - 시작 시 NVIDIA GPU 자동 감지
 - RTX 4090: GPU 고품질 모드, 후보 기본 2곡
@@ -65,11 +102,11 @@
 ## 개발 단계
 | 단계 | 내용 | 완료 기준 | 상태 |
 | --- | --- | --- | --- |
-| 0. 준비 | 저장소, HANDOFF.md | 저장소에 첫 파일 올라감 | 진행 중 (Claude 앱 권한에 DTMC 추가 대기) |
-| 1. 엔진 검증 | 4090에 ACE-Step 설치, 피아노·스트링 샘플 생성 | 사용자가 음질 합격 판정 | 대기 |
-| 2. 핵심 프로그램 | PySide6 화면, 분석, 형식 변환, 엔진 첫 실행 설치 | 원곡 → 결과 파일 완주 | 대기 |
+| 0. 준비 | 저장소, HANDOFF.md | 저장소에 첫 파일 올라감 | 완료 |
+| 1. 엔진 검증 | 프로그램 안 [악기 시험]으로 대신(C안) | 사용자가 음질 합격 판정 | 사용자 시험 대기 |
+| 2. 핵심 프로그램 | PySide6 화면, 분석, 형식 변환, 엔진 첫 실행 설치 | 원곡 → 결과 파일 완주 | v0.1.0 작성 완료, 실기 대기 |
 | 3. 노트북 대응 | 경량 모드, 속도 측정 | 길이 상한 확정 | 대기 |
-| 4. 배포 | GitHub Actions 포터블 빌드, 오류 안내 | 새 PC에서 압축 풀고 실행 성공 | 대기 |
+| 4. 배포 | GitHub Actions 포터블 빌드, 오류 안내 | 새 PC에서 압축 풀고 실행 성공 | 빌드 설정 완료 |
 | 5. 이후 | 유사도 검사, 상업 배포 | — | 대기 |
 
 1단계 음질 확인이 진행 여부를 가르는 관문이다.
@@ -90,4 +127,6 @@
 - 이 세션에서 push 하려면 GitHub → Settings → Applications → Claude → Configure 에서 DTMC 저장소 권한 추가 필요
 
 ## 다음 할 일
-1. 1단계: 4090용 ACE-Step 설치 순서와 테스트 스크립트 작성
+1. 사용자 4090 시험(위 '사용자 시험 순서') → 로그·음질 피드백 → v0.1.x 수정
+2. 원곡 반영 강도(cover 0.3/0.6)·지시문 단어 조정
+3. 노트북 측정(3단계)

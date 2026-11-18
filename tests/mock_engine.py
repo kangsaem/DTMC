@@ -81,8 +81,14 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/release_task":
             req = self._body()
             REQUESTS.append(req)
-            if req.get("task_type") == "cover" and not os.path.exists(req.get("src_audio_path", "")):
-                return self._send(wrap(None, 400, "src_audio_path not found"))
+            if req.get("task_type") == "cover":
+                sp = req.get("src_audio_path", "")
+                if not os.path.exists(sp):
+                    return self._send(wrap(None, 400, "src_audio_path not found"))
+                # 실제 서버와 같은 규칙: 절대 경로는 서버 임시 폴더(= DTMC 엔진 tmp) 안만
+                allow = os.environ.get("MOCK_TEMP") or os.path.join(os.environ.get("DTMC_ENGINE_DIR", ""), "tmp")
+                if os.path.commonpath([os.path.realpath(allow), os.path.realpath(sp)]) != os.path.realpath(allow):
+                    return self._send(wrap(None, 400, "absolute audio file paths are not allowed"))
             tid = str(uuid.uuid4())
             TASKS[tid] = {"t": time.time(), "req": req, "files": None}
             return self._send(wrap({"task_id": tid, "status": "queued", "queue_position": 1}))
