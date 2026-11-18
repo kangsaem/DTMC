@@ -48,6 +48,12 @@ MODEL_INFO = {MAIN_MODEL: ("기본 모델", 0), GEN_MODEL: ("shift3 모델", 5),
               XL_SFT: ("XL SFT 모델", 10)}
 LM_4B = "acestep-5Hz-lm-4B"                      # 큰 작곡 담당(멜로디·구성) — 서버를 다시 켜야 바뀜
 MODEL_INFO[LM_4B] = ("작곡 담당 4B", 9)
+LM_06 = "acestep-5Hz-lm-0.6B"                     # 노트북(CPU)용 작은 작곡 담당 — 처음 쓸 때 받음
+LM_17 = "acestep-5Hz-lm-1.7B"                     # 기본 설치에 들어 있음
+MODEL_INFO[LM_06] = ("작곡 담당 0.6B", 1.5)
+# CPU(노트북) 작곡 담당 선택(v0.1.14). CPU 는 float32 라 4B(약 16GB)는 안 됨 · 1.7B(약 7GB)는 메모리가 빠듯
+CPU_LM = [("off", "끔"), ("0.6B", "0.6B"), ("1.7B", "1.7B")]
+CPU_LM_MODEL = {"0.6B": LM_06, "1.7B": LM_17}
 ALT_VAE = "scragvae"                             # 대체 음원 변환부(커뮤니티 VAE, MIT) — 서버가 처음 쓸 때 스스로 받음
 ENV_VAE = {"ACESTEP_VAE_CHECKPOINT": ALT_VAE}
 ENV_LM4B = {"ACESTEP_LM_MODEL_PATH": LM_4B}

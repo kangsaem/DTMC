@@ -1,6 +1,7 @@
 """작업(백그라운드 스레드): 원곡 분석 · 생성(엔진 준비 → 원곡마다 생성 → 형식 변환·저장) · 악기 시험 · 비교 시험."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import random
 import shutil
@@ -50,6 +51,7 @@ class Plan:
     caption: str = ""                                # 직접 고친 지시문(비면 스타일 지시문)
     src_feel: bool = False                           # 원곡 느낌 참고 = 원곡 소리를 음색 참고로(멜로디는 안 따라감)
     refs: list = field(default_factory=list)         # 음색 참고 음원(실제 악기 녹음, 최대 3개) — 비우면 안 씀
+    cpu_lm: str = "off"                              # CPU(노트북) 작곡 담당: off · 0.6B · 1.7B(v0.1.14) — GPU 에서는 안 씀
 
     def target_seconds(self, src: Source | None) -> float:
         if self.length_mode == "src" and src is not None and src.duration:
@@ -81,29 +83,31 @@ def write_history(rec: dict) -> None:
 
 
 # ------------------------------------------------------------ 생성 속도(예상 시간)
-def _speed_key() -> str:
-    return "speed_" + hw.profile().mode
+def mode_key(cpu_lm: str = "off") -> str:
+    """속도 기억 이름: gpu · cpu · cpu_0.6B · cpu_1.7B(작곡 담당을 켜면 속도가 달라서 따로)."""
+    m = hw.profile().mode
+    return f"{m}_{cpu_lm}" if m == "cpu" and cpu_lm in prompt.CPU_LM_MODEL else m
 
 
-def speed() -> float | None:
+def speed(lm: str = "off") -> float | None:
     """오디오 1초를 만드는 데 걸린 시간(초) — 지난 생성에서 잰 값. 없으면 None."""
-    v = settings.get(_speed_key())
+    v = settings.get("speed_" + mode_key(lm))
     return float(v) if v else None
 
 
-def remember_speed(audio_sec: float, took: float) -> None:
+def remember_speed(audio_sec: float, took: float, lm: str = "off") -> None:
     if audio_sec <= 0:
         return
     s = took / audio_sec
-    old = speed()
-    settings.put(_speed_key(), round(s if old is None else old * 0.5 + s * 0.5, 3))
+    old = speed(lm)
+    settings.put("speed_" + mode_key(lm), round(s if old is None else old * 0.5 + s * 0.5, 3))
 
 
-def estimate(total_audio_sec: float) -> float | None:
-    s = speed()
+def estimate(total_audio_sec: float, lm: str = "off") -> float | None:
+    s = speed(lm)
     if s is None:
         return None
-    start = settings.get("start_" + hw.profile().mode) or 60.0
+    start = settings.get("start_" + mode_key(lm)) or 60.0
     return total_audio_sec * s + float(start)
 
 
@@ -146,6 +150,8 @@ class MakeJob(QThread):
         self.cancel = False
         self.failed: list[str] = []                # 비교 시험에서 건너뛴 곡(이유)
         self.outputs: list[Path] = []
+        self.prof = hw.profile()                   # 이번 작업의 실행 모드(CPU 에서 작곡 담당을 켜면 바뀜)
+        self.lm_key = "off"                        # 실제로 켠 CPU 작곡 담당(속도 기억용)
 
     def stopped(self) -> bool:
         return self.cancel
@@ -162,6 +168,7 @@ class MakeJob(QThread):
             n = len(self.outputs)
             took = time.monotonic() - t_all
             self.finished_ok.emit(True, f"{n}곡 저장 · {int(took // 60)}분 {int(took % 60)}초"
+                                  + (f" · 작곡 담당 {self.lm_key}" if self.lm_key != "off" else "")
                                   + (f" · {len(self.failed)}곡 실패(dtmc.log)" if self.failed else ""))
         except EG.Cancelled:
             self.finished_ok.emit(False, "취소했습니다")
@@ -183,6 +190,7 @@ class MakeJob(QThread):
             except Exception as e:  # noqa: BLE001 — 큰 작곡 담당을 못 받으면 평소 것으로
                 L.warning("작곡 담당 %s 준비 실패 → 평소 것으로: %s", lm, e)
                 senv.pop("ACESTEP_LM_MODEL_PATH", None)
+        cpu_lm = self._cpu_lm(senv)
         self.step.emit("engine", 0.0, "엔진 켜는 중(처음에는 모델을 읽느라 몇 분 걸릴 수 있음)")
         t0 = time.monotonic()
         was = self.eng.running() and tuple(sorted(senv.items())) == getattr(self.eng, "env_key", ())
@@ -196,19 +204,75 @@ class MakeJob(QThread):
         except EG.Cancelled:
             raise
         except EG.EngineError as e:
-            if "ACESTEP_VAE_CHECKPOINT" not in senv:
+            if cpu_lm != "off":
+                # CPU 작곡 담당 때문에 서버가 못 켜졌을 수 있음(메모리 부족 등) → 작곡 담당 없이 한 번 더
+                L.warning("작곡 담당 %s 로 켜기 실패 → 끈 채로 다시: %s", cpu_lm, e)
+                senv.pop("ACESTEP_INIT_LLM", None)
+                senv.pop("ACESTEP_LM_MODEL_PATH", None)
+                cpu_lm = "off"
+                self.step.emit("engine", 0.0, "작곡 담당 없이 다시 켜는 중(메모리 부족일 수 있음 · engine.log)")
+                self._start_vae_fallback(line, senv)
+            elif "ACESTEP_VAE_CHECKPOINT" in senv:
+                self._vae_retry(line, senv, e)
+            else:
                 raise
-            # 대체 음원 변환부를 못 받았을 수 있음(인터넷 없음 등) → 공식 변환부로 한 번 더
-            L.warning("대체 음원 변환부로 켜기 실패 → 공식 변환부로 다시: %s", e)
-            senv.pop("ACESTEP_VAE_CHECKPOINT", None)
-            self.step.emit("engine", 0.0, "대체 음원 변환부 없이 다시 켜는 중")
-            self.eng.start(line, self.stopped, extra_env=senv)
         self.senv = senv
+        self._lm_result(cpu_lm)
         if ps["quality"] == "hq" and not (EG.external_url() or self.eng.dcw):
             raise EG.EngineError("고품질(XL)은 DCW 를 꺼야 하는데 엔진을 고치지 못했습니다(dtmc.log). 기본 품질로 만드세요.")
         if not was:
-            settings.put("start_" + hw.profile().mode, round(time.monotonic() - t0, 1))
-        self.step.emit("engine", 1.0, "엔진 준비됨")
+            settings.put("start_" + mode_key(self.lm_key), round(time.monotonic() - t0, 1))
+        self.step.emit("engine", 1.0, "엔진 준비됨" + (f" · 작곡 담당 {self.lm_key}" if self.lm_key != "off" else ""))
+
+    def _start_vae_fallback(self, line, senv: dict) -> None:
+        try:
+            self.eng.start(line, self.stopped, extra_env=senv)
+        except EG.Cancelled:
+            raise
+        except EG.EngineError as e:
+            if "ACESTEP_VAE_CHECKPOINT" not in senv:
+                raise
+            self._vae_retry(line, senv, e)
+
+    def _vae_retry(self, line, senv: dict, e) -> None:
+        # 대체 음원 변환부를 못 받았을 수 있음(인터넷 없음 등) → 공식 변환부로 한 번 더
+        L.warning("대체 음원 변환부로 켜기 실패 → 공식 변환부로 다시: %s", e)
+        senv.pop("ACESTEP_VAE_CHECKPOINT", None)
+        self.step.emit("engine", 0.0, "대체 음원 변환부 없이 다시 켜는 중")
+        self.eng.start(line, self.stopped, extra_env=senv)
+
+    def _cpu_lm(self, senv: dict) -> str:
+        """CPU(노트북)에서 작곡 담당을 고른 경우: 모델 준비(0.6B 는 처음 받음) + 서버 환경. 돌려줌 = 켜려는 것(off · 0.6B · 1.7B)."""
+        k = self.plan.cpu_lm
+        if hw.profile().mode != "cpu" or k not in prompt.CPU_LM_MODEL:
+            return "off"
+        lm = prompt.CPU_LM_MODEL[k]
+        try:
+            self._need(lm, key="engine")
+        except EG.Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 — 못 받으면 끈 채로
+            L.warning("작곡 담당 %s 내려받기 실패 → 끈 채로: %s", lm, e)
+            self.step.emit("engine", 0.0, f"작곡 담당 {k} 를 받지 못해 끈 채로 만듭니다")
+            return "off"
+        senv["ACESTEP_INIT_LLM"] = "true"           # CPU 기본 = 끔(_server_env) → 여기서 덮어씀
+        senv["ACESTEP_LM_MODEL_PATH"] = lm
+        return k
+
+    def _lm_result(self, k: str) -> None:
+        """서버가 작곡 담당을 실제로 읽었는지 로그("LLM model loaded:")로 확인 → 이번 작업의 thinking 켬/끔."""
+        self.prof, self.lm_key = hw.profile(), "off"
+        if k == "off":
+            return
+        lm = prompt.CPU_LM_MODEL[k]
+        got = self.eng.lm_loaded
+        if EG.external_url() or (got and lm in got):
+            self.prof = dataclasses.replace(hw.profile(), init_llm=True, lm_model=lm, thinking=True)
+            self.lm_key = k
+            L.info("CPU 작곡 담당 켬: %s", got or lm)
+        else:
+            L.warning("CPU 작곡 담당 %s 를 켜지 못함(서버 로그: %s) → 끈 채로", lm, got or "읽지 못함")
+            self.step.emit("engine", 0.0, f"작곡 담당 {k} 를 켜지 못해 끈 채로 만듭니다(메모리 부족일 수 있음 · engine.log)")
 
     def _need(self, model: str, frac: float = 0.0, head: str = "", key: str = "generate"):
         """모델이 없으면 내려받음(처음 한 번). 진행 글 = key 단계 막대에."""
@@ -296,7 +360,7 @@ class MakeJob(QThread):
         st = prompt.STYLE_BY.get(p.style, prompt.STYLE_BY[prompt.DEFAULT_STYLE])
         ref = self._ref(wd, s)
         req = prompt.style_request(st, seconds=sec, bpm=bpm, key_scale=key, ref_path=ref, candidates=p.candidates,
-                                   profile=hw.profile(), model=self.ps["model"], caption=p.caption, force_bpm=forced,
+                                   profile=self.prof, model=self.ps["model"], caption=p.caption, force_bpm=forced,
                                    **self.ps["opt"])
         name = s.name if s is not None else st[1]
         label = f"{i + 1}/{n} {name}"
@@ -306,7 +370,7 @@ class MakeJob(QThread):
             el = time.monotonic() - t0
             self.step.emit("generate", (i + min(0.95, max(0.0, f))) / n, f"{label} · {int(el)}초" + (f" · {text[:60]}" if text else ""))
         wavs = self.eng.generate(req, wd, prog, self.stopped)
-        remember_speed(sec * len(wavs), time.monotonic() - t0)
+        remember_speed(sec * len(wavs), time.monotonic() - t0, self.lm_key)
         self.step.emit("generate", (i + 0.97) / n, f"{label} · 저장")
         slab = st[1] + (" · 직접 고침" if (p.caption or "").strip() and p.caption.strip() != st[2] else "")
         saved = []
@@ -330,7 +394,7 @@ class MakeJob(QThread):
                "model": req.get("model"), "thinking": req.get("thinking"), "caption": req.get("prompt"),
                "lyrics": req.get("lyrics"), "negative": req.get("lm_negative_prompt"),
                "refs": (list(self.plan.refs) if req.get("reference_audio_path") else []),
-               "seed": req.get("seed"), "mode": hw.profile().mode, "quality": getattr(self, "ps", {}).get("quality"),
+               "seed": req.get("seed"), "mode": hw.profile().mode, "cpu_lm": self.lm_key, "quality": getattr(self, "ps", {}).get("quality"),
                "server_env": getattr(self, "senv", {}), "lm": getattr(self.eng, "lm_loaded", ""),
                "dcw_enabled": req.get("dcw_enabled"),
                "analysis": a.to_dict() if a is not None else None}
@@ -348,7 +412,7 @@ class MakeJob(QThread):
                     raise EG.Cancelled("취소했습니다")
                 ko = prompt.INSTR[k][0]
                 req = prompt.request(instr_keys=[k], mood_keys=["calm", "warm"], seconds=TEST_SECONDS, bpm=80,
-                                     key_scale="C major", candidates=1, profile=hw.profile(), model=self.ps["model"],
+                                     key_scale="C major", candidates=1, profile=self.prof, model=self.ps["model"],
                                      **self.ps["opt"])
                 t0 = time.monotonic()
 
@@ -356,7 +420,7 @@ class MakeJob(QThread):
                     self.step.emit("generate", (i + min(0.95, f)) / len(keys),
                                    f"{i + 1}/{len(keys)} {ko} · {int(time.monotonic() - t0)}초")
                 wavs = self.eng.generate(req, work / k, prog, self.stopped)
-                remember_speed(TEST_SECONDS, time.monotonic() - t0)
+                remember_speed(TEST_SECONDS, time.monotonic() - t0, self.lm_key)
                 out = ff.convert(wavs[0], d / f"{i + 1:02d}_{ko}{ff.FORMATS[self.plan.fmt][0]}", self.plan.fmt)
                 self.outputs.append(out)
                 self.item.emit({"path": str(out), "source": "악기 시험", "instr": ko, "n": 1, "of": 1,
@@ -390,7 +454,7 @@ class MakeJob(QThread):
                     raise EG.Cancelled("취소했습니다")
                 ko = st[1]
                 head = f"{i + 1}/{n} "
-                req = prompt.style_request(st, seconds=sec, bpm=bpm, key_scale=key, ref_path=ref, profile=hw.profile(),
+                req = prompt.style_request(st, seconds=sec, bpm=bpm, key_scale=key, ref_path=ref, profile=self.prof,
                                            seed=seed, model=self.ps["model"], force_bpm=forced, **self.ps["opt"])
                 t0 = time.monotonic()
 
@@ -409,7 +473,7 @@ class MakeJob(QThread):
                     if not self.eng.running() and not EG.external_url():      # 엔진이 죽었으면 다시 켬
                         self.eng.start(lambda t: None, self.stopped, extra_env=self.senv)
                     continue
-                remember_speed(sec, time.monotonic() - t0)
+                remember_speed(sec, time.monotonic() - t0, self.lm_key)
                 stem = prompt.style_stem(p.title, s.name if s is not None else "", i + 1, ko, sec)
                 out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
                 self.outputs.append(out)
@@ -480,7 +544,7 @@ class MakeJob(QThread):
             save(0, "편집만", "편집만(엔진 안 씀)", arr)
             # 원곡 묘사(2·3번 지시문) — 작곡 담당이 있을 때만, 못 하면 기본 글
             cap = ""
-            if hw.profile().thinking and hw.profile().lm_ready:
+            if self.prof.thinking and self.prof.lm_ready:
                 try:
                     self.step.emit("generate", 1 / n, "원곡 듣고 묘사 쓰는 중")
                     usrc = ff.make_source(arr, work / "und.wav", min(120.0, max(10.0, sec)))

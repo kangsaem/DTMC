@@ -469,6 +469,8 @@ def model_ready(model: str) -> bool:
     """내려받기가 끝난 모델인지(기본 모델 = 설치 때 받음 · 추가 모델 = 끝나면 표시 파일을 둠)."""
     if external_url() or model == MAIN_MODEL:
         return True
+    if model == prompt.LM_17 and (checkpoints() / model).is_dir():     # 기본 설치 때 함께 받음
+        return True
     return (checkpoints() / model / ".dtmc_ok").is_file()
 
 

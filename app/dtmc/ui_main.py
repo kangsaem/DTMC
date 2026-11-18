@@ -485,6 +485,27 @@ class WorkWindow(DragMove, QWidget):
         lrow.addWidget(self.secs_lab)
         self.cand = Seg([(str(i), f"{i}곡") for i in (1, 2, 3, 4)], str(hw.profile().candidates))
         self.cand.changed.connect(lambda _k: self._sync())
+        # CPU(노트북) 작곡 담당(v0.1.14): 끔(기본) · 0.6B · 1.7B — GPU 는 늘 켜져 있어 안 보임
+        self.cpu_lm = Seg(prompt.CPU_LM, "off")
+        self.cpu_lm.changed.connect(lambda _k: self._sync())
+        self.cpu_lm.setToolTip("작곡 담당(멜로디·구성) — 켜면 곡 구성이 나아질 수 있으나 느려짐.\n"
+                               "0.6B = 처음 쓸 때 받음 · 1.7B = 메모리가 빠듯해 실패할 수 있음(그러면 끈 채로 만듦)\n"
+                               "바꾸면 다음 생성 때 엔진을 다시 켬(몇 분)")
+        crow2 = QHBoxLayout()
+        crow2.setSpacing(8)
+        crow2.addWidget(self.cand)
+        if hw.profile().mode == "cpu":
+            lm_lab = QLabel("작곡 담당")
+            lm_lab.setToolTip(self.cpu_lm.toolTip())
+            crow2.addSpacing(16)
+            crow2.addWidget(lm_lab)
+            crow2.addWidget(self.cpu_lm)
+            self.lm_note = self._hint("")
+            crow2.addWidget(self.lm_note, 1)
+        else:
+            self.cpu_lm.hide()
+            self.lm_note = None
+            crow2.addStretch(1)
         self.refs: list[str] = []
         self.ref_lab = QLabel("")
         self.ref_lab.setStyleSheet(f"color:{SUB};")
@@ -511,7 +532,7 @@ class WorkWindow(DragMove, QWidget):
         trow.addWidget(self.b_fit)
         trow.addWidget(self._hint("시험용 — 버튼에 마우스를 올리면 설명."), 1)
         return self._body([labeled("스타일", self.style), labeled("지시문", self.cap), labeled("", crow),
-                           labeled("길이", lrow), labeled("후보", self.cand), labeled("음색 참고", rrow), trow])
+                           labeled("길이", lrow), labeled("후보", crow2), labeled("음색 참고", rrow), trow])
 
     def _output_body(self) -> QWidget:
         self.fmt = Seg(ff.FORMAT_NAMES, "mp3")
@@ -550,6 +571,7 @@ class WorkWindow(DragMove, QWidget):
         self.len_mode.set_value(c.get("length_mode", "src"))
         self.secs.setValue(int(c.get("seconds", 60)))
         self.cand.set_value(str(c.get("candidates", hw.profile().candidates)))
+        self.cpu_lm.set_value(c.get("cpu_lm", "off") if c.get("cpu_lm") in dict(prompt.CPU_LM) else "off")
         self.fmt.set_value(c.get("fmt", "mp3"))
         self.out_dir = c.get("out_dir", "")
         self.refs = [f for f in (c.get("refs") or []) if f and Path(f).is_file()][: prompt.MAX_REFS]
@@ -559,7 +581,7 @@ class WorkWindow(DragMove, QWidget):
         settings.put("work", {
             "analyze_on": p.analyze_on, "bpm_mode": self.bpm_mode.value(), "bpm": p.bpm, "src_feel": p.src_feel,
             "style": p.style, "caption": p.caption, "length_mode": self.len_mode.value(), "seconds": p.seconds,
-            "candidates": p.candidates, "fmt": p.fmt, "out_dir": self.out_dir, "refs": self.refs,
+            "candidates": p.candidates, "cpu_lm": p.cpu_lm, "fmt": p.fmt, "out_dir": self.out_dir, "refs": self.refs,
         })
 
     def style_key(self) -> str:
@@ -588,7 +610,8 @@ class WorkWindow(DragMove, QWidget):
                          length_mode=self.len_mode.value() if (an and has) else "set", seconds=self.secs.value(),
                          candidates=int(self.cand.value()), fmt=self.fmt.value(), out_dir=self.out_dir,
                          title=self.title.text().strip(), refs=list(self.refs), style=self.style_key(),
-                         caption=self._custom(), src_feel=self.feel.value() == "on")
+                         caption=self._custom(), src_feel=self.feel.value() == "on",
+                         cpu_lm=self.cpu_lm.value() if hw.profile().mode == "cpu" else "off")
 
     def _out_dir(self) -> Path:
         return Path(self.out_dir) if self.out_dir else paths.default_out_dir()
@@ -632,7 +655,12 @@ class WorkWindow(DragMove, QWidget):
         len_txt = "원곡 길이" if p.length_mode == "src" else mmss(p.seconds)
         custom = bool(p.caption)
         self.stages["generate"].set_summary(f"{st[1]}{'(직접 고침)' if custom else ''} · {len_txt} · 후보 {p.candidates}"
+                                            + (f" · 작곡 담당 {p.cpu_lm}" if p.cpu_lm != "off" else "")
                                             + (" · 음색 참고" if self.refs and not (p.src_feel and use_src) else ""))
+        if self.lm_note is not None:
+            self.lm_note.setText({"off": "", "0.6B": "느려짐 · 처음 쓸 때 받음",
+                                  "1.7B": "많이 느려짐 · 메모리 부족이면 끈 채로"}.get(p.cpu_lm, ""))
+            self.lm_note.setStyleSheet(f"color:{WARN if p.cpu_lm == '1.7B' else SUB_TXT}; font-size:11px;")
         self.cap_note.setText("직접 고침 — 스타일을 다시 고르면 지워집니다" if custom else f"자동(스타일: {st[1]})")
         self.cap_note.setStyleSheet(f"color:{WARN if custom else SUB_TXT}; font-size:11px;")
         self.b_reset.setEnabled(custom)
@@ -654,7 +682,7 @@ class WorkWindow(DragMove, QWidget):
         total = sum(p.target_seconds(s) for s in cs) if use_src else p.target_seconds(None)
         n_out = n_src * p.candidates
         txt = (f"원곡 {len(cs)}개 → " if use_src else "원곡 없이 → ") + f"결과 {n_out}곡 · 만들 길이 합계 {mmss(total * p.candidates)}"
-        est = jobs.estimate(total * p.candidates)
+        est = jobs.estimate(total * p.candidates, p.cpu_lm)
         txt += f" · 예상 약 {max(1, round(est / 60))}분" if est else " · 예상 시간은 첫 생성 후 표시"
         self.sum.setText(txt)
         if self.mode == "setup":
