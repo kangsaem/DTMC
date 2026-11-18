@@ -1,8 +1,8 @@
-"""작업(백그라운드 스레드): 원곡 분석 · 생성(엔진 준비 → 원곡마다 생성 → 형식 변환·저장) · 악기 시험."""
+"""작업(백그라운드 스레드): 원곡 분석 · 생성(엔진 준비 → 원곡마다 생성 → 형식 변환·저장) · 악기 시험 · 비교 시험."""
 from __future__ import annotations
 
 import json
-import re
+import random
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -41,10 +41,14 @@ class Plan:
     instruments: list = field(default_factory=lambda: ["piano"])
     length_mode: str = "src"                        # src = 원곡 길이 · set = 직접
     seconds: int = 60
-    strength: str = "low"
+    strength: int = prompt.DEFAULT_STRENGTH          # 원곡 반영 %(0 = 소리 안 보냄)
     candidates: int = 1
     fmt: str = "mp3"
     out_dir: str = ""
+    title: str = ""                                  # 파일 이름 앞부분(비우면 원곡 이름 첫 단어)
+
+    def __post_init__(self):
+        self.strength = prompt.strength_pct(self.strength)       # 옛 low/mid/high 도 받음
 
     def target_seconds(self, src: Source | None) -> float:
         if self.length_mode == "src" and src is not None and src.duration:
@@ -53,11 +57,7 @@ class Plan:
 
 
 # ------------------------------------------------------------ 이름·기록
-_BAD = re.compile(r'[\\/:*?"<>|]+')
-
-
-def safe(name: str) -> str:
-    return _BAD.sub("_", name).strip().rstrip(".") or "곡"
+safe = prompt.safe
 
 
 def unique(p: Path) -> Path:
@@ -136,9 +136,11 @@ class MakeJob(QThread):
     item = Signal(dict)
     finished_ok = Signal(bool, str)
 
-    def __init__(self, eng: EG.Engine, sources: list[Source], plan: Plan, test: bool = False, parent=None):
+    def __init__(self, eng: EG.Engine, sources: list[Source], plan: Plan, test: bool = False,
+                 compare: bool = False, parent=None):
+        """test = 악기 시험 · compare = 비교 시험(첫 원곡 앞 30초 × 반영 30·50·70·90%, 같은 씨앗)."""
         super().__init__(parent)
-        self.eng, self.sources, self.plan, self.test = eng, list(sources), plan, test
+        self.eng, self.sources, self.plan, self.test, self.compare = eng, list(sources), plan, test, compare
         self.cancel = False
         self.outputs: list[Path] = []
 
@@ -146,7 +148,7 @@ class MakeJob(QThread):
         return self.cancel
 
     def steps(self) -> list[str]:
-        if self.test:
+        if self.test or self.compare:
             return ["engine", "generate"]
         return ["engine", "analyze", "generate"] if self.plan.analyze_on else ["engine", "generate"]
 
@@ -188,6 +190,8 @@ class MakeJob(QThread):
         self._engine()
         if self.test:
             return self._run_test(out_dir)
+        if self.compare:
+            return self._run_compare(out_dir)
         srcs = [s for s in self.sources if s.checked and not s.error]
         if not srcs:
             raise EG.EngineError("만들 원곡이 없습니다.")
@@ -218,12 +222,14 @@ class MakeJob(QThread):
         p = self.plan
         a = s.analysis if p.analyze_on else None
         sec = p.target_seconds(s)
-        bpm = p.bpm if p.bpm_mode == "set" else (a.bpm if a is not None and a.bpm else None)
-        key = a.key_scale if a is not None and a.key_conf >= 0.15 else ""
+        cover = p.strength > 0
+        # 반영 > 0 = 템포·조성은 원곡 그대로(보내지 않음)
+        bpm = None if cover else (p.bpm if p.bpm_mode == "set" else (a.bpm if a is not None and a.bpm else None))
+        key = "" if cover else (a.key_scale if a is not None and a.key_conf >= 0.15 else "")
         src_path = None
         wd = work / f"{i + 1}"
         wd.mkdir(parents=True, exist_ok=True)
-        if prompt.COVER_STRENGTH.get(p.strength) is not None:
+        if cover:
             self.step.emit("generate", i / n, f"{s.name} · 참고 음원 준비")
             src_path = ff.make_source(s.path, wd / "src.wav", sec)
         moods = self._moods(s)
@@ -241,15 +247,18 @@ class MakeJob(QThread):
         ilab = prompt.instr_label(p.instruments)
         saved = []
         for k, w in enumerate(wavs):
-            stem = f"{safe(s.name)}_{ilab}" + (f"_{k + 1}" if len(wavs) > 1 else "")
+            stem = prompt.out_stem(p.title, s.name, p.instruments, k + 1, sec)
             dst = unique(out_dir / (stem + ff.FORMATS[p.fmt][0]))
             out = ff.convert(w, dst, p.fmt)
             self.outputs.append(out)
             saved.append(str(out))
-            self.item.emit({"path": str(out), "source": s.name, "instr": ilab, "n": k + 1, "of": len(wavs),
-                            "seconds": sec})
+            self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "src_dur": s.duration,
+                            "strength": p.strength, "instr": ilab, "n": k + 1,
+                            "of": len(wavs), "seconds": sec})
         write_history({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "source": s.path, "outputs": saved,
-                       "instruments": p.instruments, "moods": moods, "strength": p.strength, "seconds": sec,
+                       "instruments": p.instruments, "moods": moods, "strength": p.strength,
+                       "cover_strength": req.get("audio_cover_strength"),
+                       "noise_strength": req.get("cover_noise_strength"), "seconds": sec,
                        "bpm": req.get("bpm"), "key": req.get("key_scale"), "task": req.get("task_type"),
                        "caption": req.get("prompt"), "mode": hw.profile().mode,
                        "analysis": a.to_dict() if a is not None else None})
@@ -266,7 +275,7 @@ class MakeJob(QThread):
                     raise EG.Cancelled("취소했습니다")
                 ko = prompt.INSTR[k][0]
                 req = prompt.request(instr_keys=[k], mood_keys=["calm", "warm"], seconds=TEST_SECONDS, bpm=80,
-                                     key_scale="C major", strength="low", candidates=1, profile=hw.profile())
+                                     key_scale="C major", strength=0, candidates=1, profile=hw.profile())
                 t0 = time.monotonic()
 
                 def prog(f, text, i=i, ko=ko, t0=t0):
@@ -280,5 +289,51 @@ class MakeJob(QThread):
                                 "seconds": TEST_SECONDS})
                 write_history({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "source": "악기 시험", "outputs": [str(out)],
                                "instruments": [k], "caption": req["prompt"], "mode": hw.profile().mode})
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _run_compare(self, out_dir: Path):
+        """첫 원곡 앞 30초를 반영 30·50·70·90% 로 하나씩 — 같은 씨앗(차이 = 반영 % 만)."""
+        p = self.plan
+        srcs = [s for s in self.sources if s.checked and not s.error]
+        if not srcs:
+            raise EG.EngineError("비교할 원곡이 없습니다.")
+        s = srcs[0]
+        if s.analysis is None:
+            s.analysis = analyze.analyze_file(s.path)
+            s.duration = s.analysis.duration
+        sec = float(prompt.COMPARE_SECONDS)
+        seed = random.randint(1, 2 ** 31 - 1)
+        moods = self._moods(s)
+        work = EG.tmp_dir() / time.strftime("cmp_%Y%m%d_%H%M%S")
+        work.mkdir(parents=True, exist_ok=True)
+        pcts = prompt.COMPARE_STRENGTHS
+        ilab = prompt.instr_label(p.instruments)
+        try:
+            src_path = ff.make_source(s.path, work / "src.wav", sec)
+            for i, pct in enumerate(pcts):
+                if self.cancel:
+                    raise EG.Cancelled("취소했습니다")
+                req = prompt.request(instr_keys=p.instruments, mood_keys=moods, seconds=sec, strength=pct,
+                                     src_path=src_path, candidates=1, profile=hw.profile(), seed=seed)
+                t0 = time.monotonic()
+
+                def prog(f, text, i=i, pct=pct, t0=t0):
+                    self.step.emit("generate", (i + min(0.95, max(0.0, f))) / len(pcts),
+                                   f"{i + 1}/{len(pcts)} {s.name} · 반영 {pct}% · {int(time.monotonic() - t0)}초")
+                wavs = self.eng.generate(req, work / f"{pct}", prog, self.stopped)
+                remember_speed(sec, time.monotonic() - t0)
+                stem = prompt.out_stem(p.title, s.name, p.instruments, f"반영{pct}", sec)
+                out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
+                self.outputs.append(out)
+                self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "src_dur": s.duration,
+                                "strength": pct, "instr": ilab, "seed": seed, "n": 1, "of": 1,
+                                "seconds": sec})
+                write_history({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": "compare", "source": s.path,
+                               "outputs": [str(out)], "instruments": p.instruments, "moods": moods,
+                               "strength": pct, "cover_strength": req.get("audio_cover_strength"),
+                               "noise_strength": req.get("cover_noise_strength"), "seed": seed, "seconds": sec,
+                               "caption": req.get("prompt"), "mode": hw.profile().mode})
+                self.step.emit("generate", (i + 1) / len(pcts), f"{i + 1}/{len(pcts)} 반영 {pct}% 완료")
         finally:
             shutil.rmtree(work, ignore_errors=True)

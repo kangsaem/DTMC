@@ -9,9 +9,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QMenu, QScrollArea, QSizePolicy, QSpinBox, QStyle, QStyledItemDelegate,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMenu, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStyle,
+                               QStyledItemDelegate, QVBoxLayout, QWidget)
 
 from . import __version__, engine as EG, ff, hw, jobs, log, paths, prompt, settings, taskbar, ui_style
 from .ui_widgets import (CHK_BG, SUB, SUB_TXT, WARN, Busy, DragMove, Grip, Multi, Seg, StageRow, StepBar,
@@ -21,6 +21,11 @@ L = log.log
 EMPTY_HINT = ("원곡(음원 파일) · 폴더를 여기에 끌어다 놓기", "우클릭 = 파일 추가 · 폴더 추가")
 AUDIO_FILTER = "음원 (" + " ".join(f"*{e} *{e.upper()}" for e in sorted(ff.AUDIO_EXT)) + ")"
 ROLE = Qt.UserRole + 1
+SLIDER_CSS = ("QSlider::groove:horizontal{height:6px; background:#3a3a3a; border-radius:3px;}"
+              "QSlider::sub-page:horizontal{background:#3d6fb6; border-radius:3px;}"
+              "QSlider::sub-page:horizontal:disabled{background:#4a4a4a;}"
+              "QSlider::handle:horizontal{background:#e6e6e6; width:14px; margin:-5px 0; border-radius:7px;}"
+              "QSlider::handle:horizontal:disabled{background:#777;}")
 
 
 def mmss(sec: float) -> str:
@@ -130,7 +135,9 @@ class SourceList(QListWidget):
 
 # ------------------------------------------------------------ 결과 줄(미리듣기)
 class ResultRow(QWidget):
+    """[▶][원곡] 이름 / 아래 작은 글씨 = 원곡 · 악기 · 반영 · 길이 … [폴더]. [원곡] = 같은 위치의 원곡(번갈아 듣기)."""
     play = Signal(object)
+    play_src = Signal(object)
 
     def __init__(self, info: dict, parent=None):
         super().__init__(parent)
@@ -143,12 +150,30 @@ class ResultRow(QWidget):
         self.setFixedHeight(44)
         self.b_play = small_button("▶", 30, 28, "미리듣기")
         self.b_play.clicked.connect(lambda: self.play.emit(self))
-        name = QLabel(Path(self.path).name)
+        self.src_path = info.get("src_path") or ""
+        self.src_ms = int(float(info.get("src_dur") or 0) * 1000)
+        self.res_ms = int(float(info.get("seconds") or 0) * 1000)
+        self.strength = int(info.get("strength") or 0)
+        self.res_pos = 0                       # 결과를 마지막으로 듣던 위치(ms) — [원곡]과 번갈아 들을 때 이어감
+        self.b_src = small_button("원곡", 48, 26, "같은 위치의 원곡 듣기(결과와 번갈아 비교)"
+                                  if self.strength > 0 else "원곡을 처음부터 듣기(반영 0% 결과라 위치 무관)")
+        self.b_src.clicked.connect(lambda: self.play_src.emit(self))
+        self.b_src.setVisible(bool(self.src_path))
+        parts = ([f"반영 {int(info.get('strength') or 0)}%"] if info.get("src_path") else []) + \
+            [info.get("source", ""), info.get("instr", ""), mmss(info.get("seconds", 0))] + \
+            ([f"씨앗 {info['seed']}"] if info.get("seed") else [])
+        self._texts = (Path(self.path).name, " · ".join(x for x in parts if x))
+        name = QLabel(self._texts[0])
         name.setStyleSheet("color:#e6e6e6;")
         name.setToolTip(self.path)
         self.name = name
-        sub = QLabel(f"{info.get('source', '')} · {info.get('instr', '')} · {mmss(info.get('seconds', 0))}")
+        sub = QLabel(self._texts[1])
         sub.setStyleSheet(f"color:{SUB_TXT}; font-size:11px;")
+        sub.setToolTip(self._texts[1])
+        self.sub = sub
+        for x in (name, sub):                     # 긴 이름은 줄임(…) — 줄이 칸보다 넓어져 가로 스크롤이 생기지 않게
+            x.setMinimumWidth(1)
+            x.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         col = QVBoxLayout()
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(0)
@@ -160,23 +185,48 @@ class ResultRow(QWidget):
         h.setContentsMargins(8, 4, 8, 4)
         h.setSpacing(8)
         h.addWidget(self.b_play)
+        h.addWidget(self.b_src)
         h.addLayout(col, 1)
         h.addWidget(b_dir)
 
-    def set_playing(self, on: bool):
-        self.b_play.setText("■" if on else "▶")
-        self.b_play.setChecked(False)
-        ui_style.tone(self.b_play, "blue" if on else "")
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        for lab, t in ((self.name, self._texts[0]), (self.sub, self._texts[1])):
+            mode = Qt.ElideMiddle if lab is self.name else Qt.ElideRight
+            lab.setText(lab.fontMetrics().elidedText(t, mode, max(10, lab.width())))
+
+    def set_playing(self, which: str = ""):
+        """which = 'res'(결과) · 'src'(원곡) · ''(멈춤)."""
+        self.b_play.setText("■" if which == "res" else "▶")
+        ui_style.tone(self.b_play, "blue" if which == "res" else "")
+        self.b_src.setText("■ 원곡" if which == "src" else "원곡")
+        ui_style.tone(self.b_src, "blue" if which == "src" else "")
+
+    def src_pos(self, res_pos: int) -> int:
+        """결과 위치 → 원곡 위치. 반영 0% = 처음부터 · 결과가 원곡보다 길면 원곡 길이로 접음(참고 음원이 반복이라)."""
+        if self.strength <= 0:
+            return 0
+        return res_pos % self.src_ms if self.src_ms > 0 else res_pos
+
+    def res_from_src(self, src_pos: int) -> int:
+        """원곡 위치 → 결과 위치(같은 '접힌 회차' 안에서). 반영 0% = 마지막 결과 위치 그대로."""
+        if self.strength <= 0 or self.src_ms <= 0:
+            return self.res_pos
+        pos = (self.res_pos // self.src_ms) * self.src_ms + src_pos
+        return pos if self.res_ms <= 0 or pos < self.res_ms else src_pos
 
 
 class Player:
-    """미리듣기(QtMultimedia). 못 쓰면 None 처럼 동작(▶ = 파일 열기)."""
+    """미리듣기(QtMultimedia). 못 쓰면 None 처럼 동작(▶ = 파일 열기).
+    결과(▶)와 원곡([원곡])을 번갈아 들을 때 같은 위치에서 이어 들음(ResultRow.src_pos · res_from_src)."""
 
     def __init__(self, parent):
         self.parent = parent
         self.cur: ResultRow | None = None
+        self.which = ""                         # res | src
         self.mp = None
         self._tried = False
+        self._seek: int | None = None
 
     def _ensure(self):
         """처음 ▶ 를 누를 때 만듦(오디오 장치 준비가 시작을 늦추거나 막지 않게)."""
@@ -192,42 +242,81 @@ class Player:
             self.ao.setVolume(0.9)
             self.mp.setAudioOutput(self.ao)
             self.mp.playbackStateChanged.connect(self._state)
+            self.mp.mediaStatusChanged.connect(self._status)
         except Exception as e:  # noqa: BLE001
             L.warning("미리듣기 못 씀: %s", e)
             self.mp = None
         return self.mp
 
+    def position(self) -> int:
+        return int(self.mp.position()) if self.mp is not None else 0
+
     def toggle(self, row: ResultRow):
+        """▶ = 결과. 같은 줄의 원곡을 듣던 중이면 그 위치에 맞춰 결과로 넘어감."""
         if self._ensure() is None:
             open_folder(row.path)
             return
-        if self.cur is row:
-            self.stop()
+        if self.cur is row and self.which == "res":
+            self.stop(reset=True)
             return
-        self.stop()
-        self.cur = row
-        self.mp.setSource(QUrl.fromLocalFile(row.path))
-        self.mp.play()
-        row.set_playing(True)
+        pos = row.res_from_src(self.position()) if (self.cur is row and self.which == "src") else 0
+        self._play(row, "res", row.path, pos)
 
-    def stop(self):
+    def toggle_src(self, row: ResultRow):
+        """[원곡] = 같은 위치의 원곡. 결과를 듣던 중이면 지금 위치, 아니면 마지막 결과 위치."""
+        if not row.src_path:
+            return
+        if self._ensure() is None:
+            open_folder(row.src_path)
+            return
+        if self.cur is row and self.which == "src":
+            self.stop(reset=True)
+            return
+        if self.cur is row and self.which == "res":
+            row.res_pos = self.position()
+        self._play(row, "src", row.src_path, row.src_pos(row.res_pos))
+
+    def _play(self, row, which, path, pos):
+        self.stop()
+        self.cur, self.which = row, which
+        self._seek = pos if pos > 0 else None
+        self.mp.setSource(QUrl.fromLocalFile(path))
+        self.mp.play()
+        if self._seek is not None:
+            self.mp.setPosition(self._seek)       # 이미 읽힌 경우 바로 · 아니면 _status 에서 한 번 더
+        row.set_playing(which)
+
+    def stop(self, reset: bool = False):
         if self.mp is not None:
+            if self.cur is not None and self.which == "res" and not reset:
+                try:
+                    self.cur.res_pos = self.position()
+                except RuntimeError:
+                    pass
             self.mp.stop()
         if self.cur is not None:
             try:
-                self.cur.set_playing(False)
+                if reset:
+                    self.cur.res_pos = 0
+                self.cur.set_playing("")
             except RuntimeError:
                 pass
-        self.cur = None
+        self.cur, self.which, self._seek = None, "", None
+
+    def _status(self, st):
+        from PySide6.QtMultimedia import QMediaPlayer
+        if self._seek is not None and st in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
+            self.mp.setPosition(self._seek)
+            self._seek = None
 
     def _state(self, st):
         from PySide6.QtMultimedia import QMediaPlayer
         if st == QMediaPlayer.StoppedState and self.cur is not None:
             try:
-                self.cur.set_playing(False)
+                self.cur.set_playing("")
             except RuntimeError:
                 pass
-            self.cur = None
+            self.cur, self.which = None, ""
 
 
 class Panel(QWidget):
@@ -252,6 +341,7 @@ class WorkWindow(DragMove, QWidget):
         self.ajobs: list[jobs.AnalyzeJob] = []
         self.job: jobs.MakeJob | None = None
         self.mode = "setup"                     # setup | run | done
+        self._compare = False
         self.cfg = settings.get("work", {}) or {}
         self.player = Player(self)
         self._step_key, self._step_t0 = "", time.monotonic()
@@ -320,6 +410,7 @@ class WorkWindow(DragMove, QWidget):
         self.res_scroll = QScrollArea()
         self.res_scroll.setWidgetResizable(True)
         self.res_scroll.setWidget(res_w)
+        self.res_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.res_scroll.setStyleSheet("QScrollArea{border:none; background:transparent;} QWidget{background:transparent;}")
         self.run_lab = Busy()
         no_hfw(self.run_lab, 2)
@@ -413,7 +504,7 @@ class WorkWindow(DragMove, QWidget):
     def _generate_body(self) -> QWidget:
         self.instr = Multi([(k, ko) for k, ko, _ in prompt.INSTRUMENTS], ["piano"], limit=prompt.MAX_INSTR, cols=4)
         self.instr.changed.connect(lambda _v: self._sync())
-        self.instr_note = self._hint("최대 3개까지 함께 쓸 수 있습니다.")
+        self.instr_note = self._hint("최대 3개까지 · 고른 악기만 쓰도록 엔진에 강하게 지시합니다.")
         self.instr.refused.connect(self._instr_refused)
         self.len_mode = Seg([("src", "원곡 길이"), ("set", "직접")], "src")
         self.len_mode.changed.connect(lambda _k: self._sync())
@@ -432,19 +523,40 @@ class WorkWindow(DragMove, QWidget):
         lrow.addWidget(self.len_mode, 1)
         lrow.addWidget(self.secs)
         lrow.addWidget(self.secs_lab)
-        self.strength = Seg(prompt.STRENGTHS, "low")
-        self.strength.changed.connect(lambda _k: self._sync())
+        self.slider = QSlider(Qt.Horizontal)          # 원곡 반영 0~100%(5% 단위)
+        self.slider.setRange(0, 20)
+        self.slider.setPageStep(2)
+        self.slider.setValue(prompt.DEFAULT_STRENGTH // 5)
+        self.slider.setStyleSheet(SLIDER_CSS)
+        self.slider.setFocusPolicy(Qt.NoFocus)
+        self.slider.valueChanged.connect(lambda _v: self._sync())
+        self.sl_val = QLabel("")
+        self.sl_val.setFixedWidth(44)
+        self.sl_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lo, hi = QLabel("0%"), QLabel("100%")
+        for x in (lo, hi):
+            x.setStyleSheet(f"color:{SUB_TXT}; font-size:11px;")
+        srow = QHBoxLayout()
+        srow.setSpacing(8)
+        srow.addWidget(lo)
+        srow.addWidget(self.slider, 1)
+        srow.addWidget(hi)
+        srow.addWidget(self.sl_val)
         self.str_hint = self._hint("")
         self.cand = Seg([(str(i), f"{i}곡") for i in (1, 2, 3, 4)], str(hw.profile().candidates))
         self.cand.changed.connect(lambda _k: self._sync())
-        self.b_test = small_button("악기 시험", 88, 28, "8개 악기를 20초씩 만들어 음질을 비교")
+        self.b_test = small_button("악기 시험", 88, 28, "8개 악기를 20초씩 만들어 음질을 비교(원곡 필요 없음)")
         self.b_test.clicked.connect(self.start_test)
+        pcts = "·".join(str(x) for x in prompt.COMPARE_STRENGTHS)
+        self.b_cmp = small_button("비교 시험", 88, 28, f"첫 원곡 앞 {prompt.COMPARE_SECONDS}초를 반영 {pcts}%로 하나씩(같은 씨앗)")
+        self.b_cmp.clicked.connect(self.start_compare)
         trow = QHBoxLayout()
         trow.setSpacing(8)
         trow.addWidget(self.b_test)
-        trow.addWidget(self._hint("악기 8개를 20초씩 만들어 음질을 확인합니다(원곡 필요 없음)."), 1)
+        trow.addWidget(self.b_cmp)
+        trow.addWidget(self._hint(f"비교 시험 = 첫 원곡 앞 {prompt.COMPARE_SECONDS}초를 반영 {pcts}%로 하나씩(같은 씨앗)."), 1)
         return self._body([labeled("악기", self.instr), labeled("", self.instr_note), labeled("길이", lrow),
-                           labeled("원곡 반영", self.strength), labeled("", self.str_hint),
+                           labeled("원곡 반영", srow), labeled("", self.str_hint),
                            labeled("후보", self.cand), trow])
 
     def _output_body(self) -> QWidget:
@@ -464,8 +576,12 @@ class WorkWindow(DragMove, QWidget):
         orow.addWidget(self.out_lab, 1)
         orow.addWidget(b_ch)
         orow.addWidget(b_open)
-        return self._body([labeled("형식", self.fmt), labeled("저장 폴더", orow),
-                           self._hint("파일 이름 = 원곡이름_악기(_번호). 같은 이름이 있으면 (2)를 붙입니다.")])
+        self.title = QLineEdit()
+        self.title.setMaxLength(60)
+        self.title.textChanged.connect(lambda _t: self._sync())
+        return self._body([labeled("제목", self.title), labeled("형식", self.fmt), labeled("저장 폴더", orow),
+                           self._hint("파일 이름 = 제목_악기_번호_길이(예: Tsuki_피아노_1_1m30s.mp3). 제목을 비우면 "
+                                      "원곡 이름 첫 단어. 같은 이름이 있으면 (2)를 붙입니다.")])
 
     # ================================================================ 설정 기억
     def _load_cfg(self):
@@ -478,7 +594,7 @@ class WorkWindow(DragMove, QWidget):
         self.instr.set_value(c.get("instruments", ["piano"]) or ["piano"])
         self.len_mode.set_value(c.get("length_mode", "src"))
         self.secs.setValue(int(c.get("seconds", 60)))
-        self.strength.set_value(c.get("strength", "low"))
+        self.slider.setValue(prompt.strength_pct(c.get("strength", prompt.DEFAULT_STRENGTH)) // 5)   # 옛 low/mid/high → 0/30/60
         self.cand.set_value(str(c.get("candidates", hw.profile().candidates)))
         self.fmt.set_value(c.get("fmt", "mp3"))
         self.out_dir = c.get("out_dir", "")
@@ -502,8 +618,9 @@ class WorkWindow(DragMove, QWidget):
         moods = list(self.manual_moods) if (self.mood_mode.value() == "set" or not an) else []
         return jobs.Plan(analyze_on=an, moods=moods, bpm_mode=self.bpm_mode.value() if an else "set",
                          bpm=self.bpm.value(), instruments=self.instr.value() or ["piano"],
-                         length_mode=self.len_mode.value(), seconds=self.secs.value(), strength=self.strength.value(),
-                         candidates=int(self.cand.value()), fmt=self.fmt.value(), out_dir=self.out_dir)
+                         length_mode=self.len_mode.value(), seconds=self.secs.value(), strength=self.slider.value() * 5,
+                         candidates=int(self.cand.value()), fmt=self.fmt.value(), out_dir=self.out_dir,
+                         title=self.title.text().strip())
 
     def _out_dir(self) -> Path:
         return Path(self.out_dir) if self.out_dir else paths.default_out_dir()
@@ -548,21 +665,36 @@ class WorkWindow(DragMove, QWidget):
     def _sync(self):
         p = self.plan()
         an = self.stages["analyze"]
+        v = p.strength
         self.moods.set_enabled_all(self.mood_mode.value() == "set" or not an.on)
-        self.bpm.setEnabled(self.bpm_mode.value() == "set" or not an.on)
+        self.bpm_mode.setEnabled(v == 0 and an.on)                     # 반영 > 0 = 템포·조성은 원곡 그대로
+        self.bpm.setEnabled(v == 0 and (self.bpm_mode.value() == "set" or not an.on))
         self.secs.setEnabled(p.length_mode == "set")
         self.secs_lab.setText(mmss(self.secs.value()))
         mood_txt = ("분위기 자동" if not p.moods else " · ".join(prompt.MOOD[m][0] for m in p.moods))
-        an.set_summary(f"{mood_txt} · " + ("원곡 템포" if p.bpm_mode == "src" else f"{p.bpm} BPM"))
+        if v > 0:
+            an.set_summary(f"{mood_txt} · 템포·조성 = 원곡 그대로")
+        else:
+            an.set_summary(f"{mood_txt} · " + ("원곡 템포" if p.bpm_mode == "src" else f"{p.bpm} BPM"))
         len_txt = "원곡 길이" if p.length_mode == "src" else mmss(p.seconds)
-        st_name = dict(prompt.STRENGTHS)[p.strength]
-        self.stages["generate"].set_summary(f"{prompt.instr_label(p.instruments)} · {len_txt} · 반영 {st_name} · 후보 {p.candidates}")
-        self.str_hint.setText({"low": "원곡 소리는 보내지 않고 템포·조성·분위기만 참고합니다(저작권 안전, 기본).",
-                               "mid": "원곡 소리를 약하게 참고합니다(흐름이 조금 닮음).",
-                               "high": "원곡 구조를 많이 따라갑니다. 판매·공개용이면 원곡과 너무 닮지 않았는지 꼭 확인하세요."}[p.strength])
-        self.str_hint.setStyleSheet(f"color:{WARN if p.strength == 'high' else SUB_TXT}; font-size:11px;")
+        self.stages["generate"].set_summary(f"{prompt.instr_label(p.instruments)} · {len_txt} · 반영 {v}% · 후보 {p.candidates}")
+        warn = v > prompt.WARN_STRENGTH
+        self.sl_val.setText(f"{v}%")
+        self.sl_val.setStyleSheet(f"color:{WARN if warn else '#e6e6e6'}; font-weight:bold;")
+        if v == 0:
+            t = "원곡 소리는 쓰지 않고 템포·조성·분위기만 참고해 새로 만듭니다(저작권 가장 안전)."
+        elif v <= 40:
+            t = "원곡 흐름을 조금 따르고 나머지는 자유롭게 만듭니다. 템포·조성은 원곡 그대로."
+        elif not warn:
+            t = "원곡의 화음 진행·구조를 대부분 따라가며 악기만 바꿉니다. 템포·조성은 원곡 그대로."
+        else:
+            t = "원곡과 매우 닮습니다. 공개·판매용이면 원곡과 너무 닮지 않았는지 꼭 확인하세요."
+        self.str_hint.setText(t)
+        self.str_hint.setStyleSheet(f"color:{WARN if warn else SUB_TXT}; font-size:11px;")
+        cur = self._current()
+        self.title.setPlaceholderText("비우면 원곡 이름 첫 단어" + (f" (예: {prompt.first_word(cur.name)})" if cur else ""))
         self.out_lab.setText(self.out_lab.fontMetrics().elidedText(str(self._out_dir()), Qt.ElideMiddle, 250))
-        self.stages["output"].set_summary(f"{p.fmt.upper()} · {self._out_dir().name}")
+        self.stages["output"].set_summary((f"{p.title} · " if p.title else "") + f"{p.fmt.upper()} · {self._out_dir().name}")
         # 요약 · 예상 시간
         cs = self.checked()
         total = sum(p.target_seconds(s) for s in cs)
@@ -584,6 +716,7 @@ class WorkWindow(DragMove, QWidget):
         self.b_start.setVisible(self.mode != "run")           # 설정 = [AUTO] · 생성 중 = [취소]만 · 끝 = [폴더 열기][돌아가기]
         self.b_cancel.setVisible(self.mode != "setup")
         self.b_test.setEnabled(self.mode == "setup")
+        self.b_cmp.setEnabled(self.mode == "setup" and bool(cs))
         if self.mode == "setup":
             self._save_cfg()
 
@@ -719,13 +852,21 @@ class WorkWindow(DragMove, QWidget):
         if self.mode == "setup":
             self._run(test=True)
 
-    def _run(self, test: bool):
+    def start_compare(self):
+        if self.mode != "setup":
+            return
+        if not self.checked():
+            ui_style.notice(self, "비교할 원곡이 없습니다. 원곡을 넣고 체크하세요.")
+            return
+        self._run(test=False, compare=True)
+
+    def _run(self, test: bool, compare: bool = False):
         if not self._ensure_engine():
             return
         self.player.stop()
         plan = self.plan()
         self._save_cfg()
-        self.job = jobs.MakeJob(self.eng, self.checked(), plan, test=test, parent=self)
+        self.job = jobs.MakeJob(self.eng, self.checked(), plan, test=test, compare=compare, parent=self)
         self.job.step.connect(self._on_step)
         self.job.item.connect(self._on_item)
         self.job.finished_ok.connect(self._on_done)
@@ -764,6 +905,7 @@ class WorkWindow(DragMove, QWidget):
     def _on_item(self, info):
         row = ResultRow(info)
         row.play.connect(self.player.toggle)
+        row.play_src.connect(self.player.toggle_src)
         self.res_box.insertWidget(self.res_box.count() - 1, row)
         QTimer.singleShot(50, lambda: self.res_scroll.verticalScrollBar().setValue(
             self.res_scroll.verticalScrollBar().maximum()))
@@ -776,6 +918,7 @@ class WorkWindow(DragMove, QWidget):
 
     def _on_done(self, ok, msg):
         outs = list(self.job.outputs) if self.job is not None else []
+        self._compare = bool(self.job is not None and self.job.compare)
         self.job = None
         self.mode = "done"
         self.setWindowTitle(f"DTMC {__version__}")
@@ -783,7 +926,8 @@ class WorkWindow(DragMove, QWidget):
         taskbar.flash(self)
         if ok:
             self.step_bar.finish(msg)
-            self.run_lab.halt(f"완료 · {msg}")
+            self.run_lab.halt(f"완료 · {msg}" + (" · ▶ 결과와 [원곡]을 번갈아 들어 보고 마음에 드는 %를 고르세요"
+                                                if self._compare else ""))
         else:
             self.run_lab.halt(msg)
             self.run_lab.setStyleSheet(f"color:{WARN};")

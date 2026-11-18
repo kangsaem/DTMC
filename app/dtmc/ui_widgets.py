@@ -179,7 +179,7 @@ class Seg(QWidget):
             self.group.addButton(b)
             self.btns[k] = b
             lay.addWidget(b, 1)
-            b.clicked.connect(lambda _=False, k=k: self.changed.emit(k))
+            b.clicked.connect(lambda _=False, k=k: (self._grey(), self.changed.emit(k)))
         self.set_value(cur if cur in self.btns else next(iter(self.btns)))
 
     def value(self):
@@ -188,6 +188,20 @@ class Seg(QWidget):
     def set_value(self, k):
         if k in self.btns:
             self.btns[k].setChecked(True)
+            self._grey()
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == QEvent.EnabledChange:
+            self._grey()
+
+    def _grey(self):
+        """꺼짐(비활성)이면 켜진 버튼도 흐린 회청색·회색 글자로(ui_style 은 꺼져도 밝은 파랑으로 그려서, v0.1.6)."""
+        on = self.isEnabled()
+        for b in self.btns.values():
+            want = "" if on or not b.isChecked() else ui_style.dim(ui_style.SEL_BLUE)
+            if (b.property("tone_color") or "") != want:
+                ui_style.tone(b, color=want)
 
 
 class Multi(QWidget):
