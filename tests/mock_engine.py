@@ -89,6 +89,9 @@ class H(BaseHTTPRequestHandler):
                 allow = os.environ.get("MOCK_TEMP") or os.path.join(os.environ.get("DTMC_ENGINE_DIR", ""), "tmp")
                 if os.path.commonpath([os.path.realpath(allow), os.path.realpath(sp)]) != os.path.realpath(allow):
                     return self._send(wrap(None, 400, "absolute audio file paths are not allowed"))
+            rp = req.get("reference_audio_path")
+            if rp and not os.path.exists(rp):
+                return self._send(wrap(None, 400, "reference_audio_path not found"))
             tid = str(uuid.uuid4())
             TASKS[tid] = {"t": time.time(), "req": req, "files": None}
             return self._send(wrap({"task_id": tid, "status": "queued", "queue_position": 1}))
@@ -103,6 +106,13 @@ class H(BaseHTTPRequestHandler):
                 if el < DELAY:
                     res = [{"file": "", "status": 0, "progress": el / DELAY, "stage": "running", "error": None}]
                     out.append({"task_id": tid, "status": 0, "result": json.dumps(res), "progress_text": "diffusion"})
+                    continue
+                if t["req"].get("full_analysis_only"):      # 원곡 이해: 실제 서버처럼 결과 한 덩어리
+                    res = [{"status_message": "Full Hardware Analysis Success", "bpm": 110, "keyscale": "A major",
+                            "genre": "J-pop, anime, orchestral",
+                            "prompt": "A warm and nostalgic orchestral pop track with strings and drums, hopeful mood.",
+                            "metas": {}, "audio_paths": []}]
+                    out.append({"task_id": tid, "status": 1, "result": json.dumps(res), "progress_text": "done"})
                     continue
                 if t["files"] is None:
                     files = []

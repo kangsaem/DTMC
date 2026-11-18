@@ -92,24 +92,46 @@ assert cov[0]["audio_cover_strength"] == 0.3 and cov[0]["cover_noise_strength"] 
 assert os.path.isabs(cov[0]["src_audio_path"]) and "bpm" not in cov[0] and "key_scale" not in cov[0], cov[0]
 assert all(r["lyrics"] == "[Instrumental]" for r in reqs)
 
-# 비교 시험: 첫 원곡 앞 30초 × 30·50·70·90%, 같은 씨앗
+# 새 지시문(v0.1.7)
+c2 = prompt.caption2(["piano"], ["calm", "warm", "bright"])
+assert c2.startswith("Solo piano, neo-classical.") and "no drums" not in c2 and "Calm, peaceful, warm, intimate mood." in c2, c2
+assert "bright" not in c2                                     # 분위기는 2개까지
+neg = prompt.negative2(["piano"])
+assert "drums" in neg and "violin" in neg and "piano" not in neg.replace("pianist", ""), neg
+assert prompt.mood_words("A warm and nostalgic orchestral pop track with strings and drums, hopeful") == ["warm", "nostalgic", "hopeful"]
+r2 = prompt.request2(instr_keys=["piano"], mood_keys=["calm"], seconds=60, bpm=110, key_scale="A major", ref_path="/r.wav")
+assert r2["task_type"] == "text2music" and r2["vocal_language"] == "unknown" and r2["lyrics"].startswith("[Intro - soft piano]")
+assert r2["reference_audio_path"] == "/r.wav" and r2["bpm"] == 110 and "src_audio_path" not in r2
+
+# 상한 확인 시험: 60초 × (지금 / 새 지시문 / + 음색 참고 / + 원곡 이해), 같은 씨앗 — 언어 모델 있는 GPU 로 가정
+from dtmc import hw  # noqa: E402
+
+hw._PROFILE = hw.Profile("gpu", "test", True, "acestep-5Hz-lm-1.7B", True, 2)
 n0 = len(reqs)
-plan = jobs.Plan(instruments=["piano"], fmt="mp3", out_dir=str(tmp / "cmp"), title="Tsuki")
+ref = ff.make_test_tone(tmp / "piano ref.wav", 12, 80)
+plan = jobs.Plan(instruments=["piano"], fmt="mp3", out_dir=str(tmp / "cmp"), title="Tsuki", ref_audio=str(ref))
 job = jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan, compare=True)
 res, items = run_job(job)
 assert res.get("ok") and len(items) == 4, (res, items)
-names = sorted(Path(i["path"]).name for i in items)
-assert names == sorted(f"Tsuki_피아노_반영{x}_30s.mp3" for x in (30, 50, 70, 90)), names
+names = [Path(i["path"]).name for i in items]
+assert names == [f"Tsuki_피아노_{x}_1m.mp3" for x in ("시험1_지금", "시험2_새지시문", "시험3_음색참고", "시험4_원곡이해")], names
 creq = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:]
-assert [r["audio_cover_strength"] for r in creq] == [0.3, 0.5, 0.7, 0.9], creq
-assert [r["cover_noise_strength"] for r in creq] == [0.0, 0.0, 0.15, 0.45]
-assert len({r["seed"] for r in creq}) == 1 and all(r["use_random_seed"] is False for r in creq)
-assert all(r["audio_duration"] == 30 and r["batch_size"] == 1 for r in creq)
-assert all(i["src_path"] == str(src) and i["strength"] in (30, 50, 70, 90) for i in items)
-# 같은 이름 → (2)
-job = jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan, compare=True)
-res, items = run_job(job)
-assert res.get("ok") and all(" (2)" in Path(i["path"]).name for i in items), [i["path"] for i in items]
+und = [r for r in creq if r.get("full_analysis_only")]
+gen = [r for r in creq if not r.get("full_analysis_only")]
+assert len(und) == 1 and os.path.isabs(und[0]["src_audio_path"]) and len(gen) == 4
+assert all(r["task_type"] == "text2music" and "src_audio_path" not in r and r["thinking"] is True for r in gen)
+assert len({r["seed"] for r in gen}) == 1 and all(r["audio_duration"] == 60 for r in gen)
+assert "no other instruments" in gen[0]["prompt"] and "lm_negative_prompt" not in gen[0]
+assert gen[1]["prompt"].startswith("Solo piano") and "reference_audio_path" not in gen[1]
+assert os.path.isabs(gen[2]["reference_audio_path"]) and gen[3]["reference_audio_path"]
+assert gen[3]["prompt"].endswith("Warm, nostalgic, hopeful mood."), gen[3]["prompt"]     # 원곡 이해의 분위기 단어만(악기 이름 X)
+assert all(i["label"] and i["strength"] == 0 for i in items)
+# 음색 참고 없음 · 언어 모델 없음 → 2곡
+hw._PROFILE = hw.Profile("cpu", "test", False, "", False, 1)
+plan = jobs.Plan(instruments=["piano"], fmt="mp3", out_dir=str(tmp / "cmp2"))
+res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan, compare=True))
+assert res.get("ok") and len(items) == 2, (res, items)
+hw._PROFILE = None
 print("compare ok", names)
 
 # 악기 시험

@@ -46,6 +46,7 @@ class Plan:
     fmt: str = "mp3"
     out_dir: str = ""
     title: str = ""                                  # 파일 이름 앞부분(비우면 원곡 이름 첫 단어)
+    ref_audio: str = ""                              # 음색 참고 음원(좋은 실제 악기 녹음) — 비교 시험 3·4번에 씀
 
     def __post_init__(self):
         self.strength = prompt.strength_pct(self.strength)       # 옛 low/mid/high 도 받음
@@ -293,7 +294,8 @@ class MakeJob(QThread):
             shutil.rmtree(work, ignore_errors=True)
 
     def _run_compare(self, out_dir: Path):
-        """첫 원곡 앞 30초를 반영 30·50·70·90% 로 하나씩 — 같은 씨앗(차이 = 반영 % 만)."""
+        """상한 확인 시험(v0.1.7): 첫 원곡 기준 60초, 같은 씨앗으로 4곡 —
+        1 지금 방식 · 2 새 지시문 · 3 + 음색 참고(넣었을 때) · 4 + 원곡 이해(언어 모델 있을 때). 원곡 소리는 생성에 안 씀."""
         p = self.plan
         srcs = [s for s in self.sources if s.checked and not s.error]
         if not srcs:
@@ -302,38 +304,69 @@ class MakeJob(QThread):
         if s.analysis is None:
             s.analysis = analyze.analyze_file(s.path)
             s.duration = s.analysis.duration
+        a = s.analysis
         sec = float(prompt.COMPARE_SECONDS)
         seed = random.randint(1, 2 ** 31 - 1)
         moods = self._moods(s)
+        bpm = a.bpm or None
+        key = a.key_scale if a.key_conf >= 0.15 else ""
+        pr = hw.profile()
         work = EG.tmp_dir() / time.strftime("cmp_%Y%m%d_%H%M%S")
         work.mkdir(parents=True, exist_ok=True)
-        pcts = prompt.COMPARE_STRENGTHS
         ilab = prompt.instr_label(p.instruments)
         try:
-            src_path = ff.make_source(s.path, work / "src.wav", sec)
-            for i, pct in enumerate(pcts):
+            ref = None
+            if p.ref_audio and Path(p.ref_audio).is_file():
+                self.step.emit("generate", 0.0, "음색 참고 음원 준비")
+                ref = ff.make_source(p.ref_audio, work / "ref.wav", min(90.0, max(10.0, ff.duration(p.ref_audio))))
+            common = dict(instr_keys=p.instruments, mood_keys=moods, seconds=sec, bpm=bpm, key_scale=key,
+                          profile=pr, seed=seed)
+            cases = [("시험1_지금", "지금 방식", lambda: prompt.request(strength=0, candidates=1, **common)),
+                     ("시험2_새지시문", "새 지시문", lambda: prompt.request2(**common))]
+            if ref is not None:
+                cases.append(("시험3_음색참고", "새 지시문 + 음색 참고", lambda: prompt.request2(ref_path=ref, **common)))
+            und = {}
+            if pr.thinking and pr.lm_ready:
+                def with_und():
+                    return prompt.request2(ref_path=ref, extra_moods=prompt.mood_words(
+                        f"{und.get('caption', '')} {und.get('genres', '')}"), **common)
+                cases.append(("시험4_원곡이해", "새 지시문" + (" + 음색 참고" if ref is not None else "") + " + 원곡 이해",
+                              with_und))
+            n = len(cases)
+            for i, (tag, label, build) in enumerate(cases):
                 if self.cancel:
                     raise EG.Cancelled("취소했습니다")
-                req = prompt.request(instr_keys=p.instruments, mood_keys=moods, seconds=sec, strength=pct,
-                                     src_path=src_path, candidates=1, profile=hw.profile(), seed=seed)
                 t0 = time.monotonic()
 
-                def prog(f, text, i=i, pct=pct, t0=t0):
-                    self.step.emit("generate", (i + min(0.95, max(0.0, f))) / len(pcts),
-                                   f"{i + 1}/{len(pcts)} {s.name} · 반영 {pct}% · {int(time.monotonic() - t0)}초")
-                wavs = self.eng.generate(req, work / f"{pct}", prog, self.stopped)
+                def prog(f, text, i=i, label=label, t0=t0):
+                    self.step.emit("generate", (i + min(0.95, max(0.0, f))) / n,
+                                   f"{i + 1}/{n} {label} · {int(time.monotonic() - t0)}초")
+                if build is cases[-1][2] and tag.startswith("시험4"):
+                    self.step.emit("generate", i / n, f"{i + 1}/{n} 원곡 이해(엔진이 원곡을 듣고 묘사)")
+                    usrc = ff.make_source(s.path, work / "und.wav", min(120.0, max(10.0, s.duration or 60.0)))
+                    try:
+                        und.update(self.eng.understand(prompt.understand_request(usrc), prog, self.stopped))
+                    except EG.Cancelled:
+                        raise
+                    except Exception as e:  # noqa: BLE001 — 이해가 안 돼도 나머지 시험 결과는 살림
+                        L.warning("원곡 이해 실패: %s", e)
+                        und["error"] = str(e)
+                req = build()
+                wavs = self.eng.generate(req, work / f"{i + 1}", prog, self.stopped)
                 remember_speed(sec, time.monotonic() - t0)
-                stem = prompt.out_stem(p.title, s.name, p.instruments, f"반영{pct}", sec)
+                stem = prompt.out_stem(p.title, s.name, p.instruments, tag, sec)
                 out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
                 self.outputs.append(out)
                 self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "src_dur": s.duration,
-                                "strength": pct, "instr": ilab, "seed": seed, "n": 1, "of": 1,
-                                "seconds": sec})
-                write_history({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": "compare", "source": s.path,
-                               "outputs": [str(out)], "instruments": p.instruments, "moods": moods,
-                               "strength": pct, "cover_strength": req.get("audio_cover_strength"),
-                               "noise_strength": req.get("cover_noise_strength"), "seed": seed, "seconds": sec,
-                               "caption": req.get("prompt"), "mode": hw.profile().mode})
-                self.step.emit("generate", (i + 1) / len(pcts), f"{i + 1}/{len(pcts)} 반영 {pct}% 완료")
+                                "strength": 0, "label": f"{i + 1}. {label}", "instr": ilab, "seed": seed,
+                                "n": 1, "of": 1, "seconds": sec})
+                write_history({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": "compare2", "case": tag,
+                               "source": s.path, "outputs": [str(out)], "instruments": p.instruments, "moods": moods,
+                               "seed": seed, "seconds": sec, "bpm": req.get("bpm"), "key": req.get("key_scale"),
+                               "thinking": req.get("thinking"), "caption": req.get("prompt"),
+                               "lyrics": req.get("lyrics"), "negative": req.get("lm_negative_prompt"),
+                               "ref_audio": p.ref_audio if "reference_audio_path" in req else "",
+                               "understand": und if tag.startswith("시험4") else None, "mode": pr.mode})
+                self.step.emit("generate", (i + 1) / n, f"{i + 1}/{n} {label} 완료")
         finally:
             shutil.rmtree(work, ignore_errors=True)

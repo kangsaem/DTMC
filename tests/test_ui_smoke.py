@@ -137,6 +137,12 @@ w._load_cfg()
 assert w.slider.value() * 5 == 60 and settings.get("work")["strength"] == 60, settings.get("work")
 
 # 비교 시험(가짜 엔진) → 결과 4줄 + [원곡]
+from dtmc import hw  # noqa: E402
+
+hw._PROFILE = hw.Profile("gpu", "GPU · 시험", True, "acestep-5Hz-lm-1.7B", True, 2)
+w._set_ref(str(a2))
+assert "Night Drive" in w.ref_lab.text()
+shot(w, "03c_work_generate_ref.png")
 w.start_compare()
 for _ in range(800):
     pump(0.05)
@@ -148,7 +154,7 @@ from PySide6.QtCore import QEvent  # noqa: E402
 app.sendPostedEvents(None, QEvent.DeferredDelete)      # 지난 결과 줄(deleteLater) 정리
 rows = w.findChildren(ResultRow)
 names = sorted(Path(r.path).name for r in rows)
-assert names == sorted(f"봄날의_피아노+스트링_반영{x}_30s.mp3" for x in (30, 50, 70, 90)), names
+assert names == sorted(f"봄날의_피아노+스트링_{x}_1m.mp3" for x in ("시험1_지금", "시험2_새지시문", "시험3_음색참고", "시험4_원곡이해")), names
 shot(w, "08_compare_done.png")
 w.back_to_setup()
 print("OK test_ui_smoke")

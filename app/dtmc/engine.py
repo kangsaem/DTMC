@@ -602,26 +602,41 @@ class Engine:
             shutil.copyfileobj(r, f)
         return dst
 
-    def generate(self, req: dict, dst_dir: Path, on_progress, should_stop, timeout: float = 3600.0) -> list[Path]:
-        """요청 하나(후보 batch_size 곡) → 받은 WAV 경로 목록. on_progress(0~1, 글자)."""
-        L.info("생성 요청: %s", json.dumps({k: v for k, v in req.items() if k != "lyrics"}, ensure_ascii=False))
-        tid = self.submit(req)
+    def _wait(self, tid: str, on_progress, should_stop, timeout: float, what: str) -> dict:
         t0 = time.monotonic()
         while True:
             if should_stop():
                 self.stop()                      # 생성 중 취소 = 엔진을 꺼서 바로 멈춤(다음 생성 때 다시 켬)
                 raise Cancelled("취소했습니다")
             if not external_url() and self.proc is not None and self.proc.poll() is not None:
-                raise EngineError("생성 중에 엔진이 멈췄습니다(메모리 부족일 수 있음, engine.log 확인).")
+                raise EngineError(f"{what} 중에 엔진이 멈췄습니다(메모리 부족일 수 있음, engine.log 확인).")
             q = self.query(tid)
             if q["status"] == 1:
-                break
+                return q
             if q["status"] == 2:
-                raise EngineError(f"생성 실패: {q['error'] or q['text'] or '이유 모름'}")
+                raise EngineError(f"{what} 실패: {q['error'] or q['text'] or '이유 모름'}")
             on_progress(q["progress"], q["text"])
             if time.monotonic() - t0 > timeout:
-                raise EngineError("생성 시간이 너무 오래 걸려 중단했습니다.")
+                raise EngineError(f"{what} 시간이 너무 오래 걸려 중단했습니다.")
             time.sleep(1.0)
+
+    def understand(self, req: dict, on_progress, should_stop, timeout: float = 900.0) -> dict:
+        """원곡 이해(full_analysis_only) → {caption, genres, bpm, keyscale}. 언어 모델이 켜져 있어야 함."""
+        L.info("원곡 이해 요청: %s", json.dumps(req, ensure_ascii=False))
+        q = self._wait(self.submit(req), on_progress, should_stop, timeout, "원곡 이해")
+        r = next((x for x in q["raw"] or [] if isinstance(x, dict)), {})
+        m = r.get("metas") or {}
+        out = {"caption": r.get("prompt") or m.get("caption") or "",
+               "genres": r.get("genre") or m.get("genres") or m.get("genre") or "",
+               "bpm": r.get("bpm") or m.get("bpm"), "keyscale": r.get("keyscale") or m.get("keyscale") or ""}
+        L.info("원곡 이해 결과: %s", json.dumps(out, ensure_ascii=False))
+        return out
+
+    def generate(self, req: dict, dst_dir: Path, on_progress, should_stop, timeout: float = 3600.0) -> list[Path]:
+        """요청 하나(후보 batch_size 곡) → 받은 WAV 경로 목록. on_progress(0~1, 글자)."""
+        L.info("생성 요청: %s", json.dumps(req, ensure_ascii=False))
+        t0 = time.monotonic()
+        q = self._wait(self.submit(req), on_progress, should_stop, timeout, "생성")
         if not q["files"]:
             raise EngineError("생성은 끝났지만 결과 파일이 없습니다.")
         out = []

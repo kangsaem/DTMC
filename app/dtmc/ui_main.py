@@ -159,7 +159,8 @@ class ResultRow(QWidget):
                                   if self.strength > 0 else "원곡을 처음부터 듣기(반영 0% 결과라 위치 무관)")
         self.b_src.clicked.connect(lambda: self.play_src.emit(self))
         self.b_src.setVisible(bool(self.src_path))
-        parts = ([f"반영 {int(info.get('strength') or 0)}%"] if info.get("src_path") else []) + \
+        parts = ([info["label"]] if info.get("label") else
+                 [f"반영 {int(info.get('strength') or 0)}%"] if info.get("src_path") else []) + \
             [info.get("source", ""), info.get("instr", ""), mmss(info.get("seconds", 0))] + \
             ([f"씨앗 {info['seed']}"] if info.get("seed") else [])
         self._texts = (Path(self.path).name, " · ".join(x for x in parts if x))
@@ -547,17 +548,33 @@ class WorkWindow(DragMove, QWidget):
         self.cand.changed.connect(lambda _k: self._sync())
         self.b_test = small_button("악기 시험", 88, 28, "8개 악기를 20초씩 만들어 음질을 비교(원곡 필요 없음)")
         self.b_test.clicked.connect(self.start_test)
-        pcts = "·".join(str(x) for x in prompt.COMPARE_STRENGTHS)
-        self.b_cmp = small_button("비교 시험", 88, 28, f"첫 원곡 앞 {prompt.COMPARE_SECONDS}초를 반영 {pcts}%로 하나씩(같은 씨앗)")
+        self.b_cmp = small_button("비교 시험", 88, 28,
+                                  f"첫 원곡 기준 {prompt.COMPARE_SECONDS}초를 같은 씨앗으로 최대 4곡(원곡 소리는 쓰지 않음)")
         self.b_cmp.clicked.connect(self.start_compare)
         trow = QHBoxLayout()
         trow.setSpacing(8)
         trow.addWidget(self.b_test)
         trow.addWidget(self.b_cmp)
-        trow.addWidget(self._hint(f"비교 시험 = 첫 원곡 앞 {prompt.COMPARE_SECONDS}초를 반영 {pcts}%로 하나씩(같은 씨앗)."), 1)
+        trow.addWidget(self._hint("비교 시험 = 1 지금 방식 · 2 새 지시문 · 3 + 음색 참고 · 4 + 원곡 이해 "
+                                  f"({prompt.COMPARE_SECONDS}초, 같은 씨앗)."), 1)
+        self.ref_audio = ""
+        self.ref_lab = QLabel("")
+        self.ref_lab.setStyleSheet(f"color:{SUB};")
+        self.ref_lab.setMinimumWidth(1)
+        self.ref_lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        b_ref = small_button("선택", 52, 26, "잘 녹음된 실제 악기 연주(예: 좋아하는 피아노 녹음) — 음색·연주 느낌만 참고")
+        b_ref.clicked.connect(self.pick_ref)
+        b_refx = small_button("지움", 52)
+        b_refx.clicked.connect(lambda: self._set_ref(""))
+        rrow = QHBoxLayout()
+        rrow.setSpacing(6)
+        rrow.addWidget(self.ref_lab, 1)
+        rrow.addWidget(b_ref)
+        rrow.addWidget(b_refx)
+        self._ref_row = labeled("음색 참고", rrow)
         return self._body([labeled("악기", self.instr), labeled("", self.instr_note), labeled("길이", lrow),
                            labeled("원곡 반영", srow), labeled("", self.str_hint),
-                           labeled("후보", self.cand), trow])
+                           labeled("후보", self.cand), self._ref_row, trow])
 
     def _output_body(self) -> QWidget:
         self.fmt = Seg(ff.FORMAT_NAMES, "mp3")
@@ -598,6 +615,7 @@ class WorkWindow(DragMove, QWidget):
         self.cand.set_value(str(c.get("candidates", hw.profile().candidates)))
         self.fmt.set_value(c.get("fmt", "mp3"))
         self.out_dir = c.get("out_dir", "")
+        self.ref_audio = c.get("ref_audio", "") if Path(c.get("ref_audio", "") or "_").is_file() else ""
         self._mood_mode()
         op = c.get("open", "generate")
         if op in self.stages:
@@ -609,7 +627,7 @@ class WorkWindow(DragMove, QWidget):
             "analyze_on": p.analyze_on, "mood_mode": self.mood_mode.value(), "moods": self.manual_moods,
             "bpm_mode": p.bpm_mode, "bpm": p.bpm, "instruments": p.instruments, "length_mode": p.length_mode,
             "seconds": p.seconds, "strength": p.strength, "candidates": p.candidates, "fmt": p.fmt,
-            "out_dir": self.out_dir,
+            "out_dir": self.out_dir, "ref_audio": self.ref_audio,
             "open": next((k for k, s in self.stages.items() if s.open_), ""),
         })
 
@@ -620,10 +638,19 @@ class WorkWindow(DragMove, QWidget):
                          bpm=self.bpm.value(), instruments=self.instr.value() or ["piano"],
                          length_mode=self.len_mode.value(), seconds=self.secs.value(), strength=self.slider.value() * 5,
                          candidates=int(self.cand.value()), fmt=self.fmt.value(), out_dir=self.out_dir,
-                         title=self.title.text().strip())
+                         title=self.title.text().strip(), ref_audio=self.ref_audio)
 
     def _out_dir(self) -> Path:
         return Path(self.out_dir) if self.out_dir else paths.default_out_dir()
+
+    def pick_ref(self):
+        f, _ = QFileDialog.getOpenFileName(self, "음색 참고 음원(실제 악기 녹음)", settings.get("last_in", ""), AUDIO_FILTER)
+        if f:
+            self._set_ref(f)
+
+    def _set_ref(self, f):
+        self.ref_audio = f
+        self._sync()
 
     def pick_out(self):
         d = QFileDialog.getExistingDirectory(self, "저장 폴더", str(self._out_dir()))
@@ -693,6 +720,9 @@ class WorkWindow(DragMove, QWidget):
         self.str_hint.setStyleSheet(f"color:{WARN if warn else SUB_TXT}; font-size:11px;")
         cur = self._current()
         self.title.setPlaceholderText("비우면 원곡 이름 첫 단어" + (f" (예: {prompt.first_word(cur.name)})" if cur else ""))
+        self.ref_lab.setText(self.ref_lab.fontMetrics().elidedText(
+            Path(self.ref_audio).name if self.ref_audio else "없음 — 비교 시험 3번은 건너뜀", Qt.ElideMiddle, 250))
+        self.ref_lab.setToolTip(self.ref_audio)
         self.out_lab.setText(self.out_lab.fontMetrics().elidedText(str(self._out_dir()), Qt.ElideMiddle, 250))
         self.stages["output"].set_summary((f"{p.title} · " if p.title else "") + f"{p.fmt.upper()} · {self._out_dir().name}")
         # 요약 · 예상 시간
@@ -926,7 +956,7 @@ class WorkWindow(DragMove, QWidget):
         taskbar.flash(self)
         if ok:
             self.step_bar.finish(msg)
-            self.run_lab.halt(f"완료 · {msg}" + (" · ▶ 결과와 [원곡]을 번갈아 들어 보고 마음에 드는 %를 고르세요"
+            self.run_lab.halt(f"완료 · {msg}" + (" · 1~4번을 차례로 들어 보고 어느 것이 나은지 알려 주세요"
                                                 if self._compare else ""))
         else:
             self.run_lab.halt(msg)
