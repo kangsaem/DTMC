@@ -1,6 +1,6 @@
 """시작 창(DTME 시작 창 틀 그대로): 제목 표시줄·테두리 없는 400×560, 위 = 정사각형 영상(assets/start.mp4, v0.1.15:
 처음엔 첫 장면(start_poster.jpg) → [AUTO] 를 누르면 소리 없이 재생 → 끝나면 작업 창(v0.1.16).
-재생 중 [AUTO] = [건너뛰기] · 그림 클릭 = 건너뛰기 · 원곡을 끌어다 놓으면 바로. 영상을 못 쓰면 start.png · 바로 작업 창)
+재생 중 [AUTO] 를 한 번 더 누르면 건너뜀(글자는 AUTO 그대로 — MOSCO v0.8.3 과 같게, v0.1.17) · 원곡을 끌어다 놓으면 바로. 영상을 못 쓰면 start.png · 바로 작업 창)
 + 왼쪽 위 'DTMC'·버전 + 오른쪽 위 ✕(종료) + 오른쪽 아래 세로 글자, 아래(#262626) = [AUTO] 160×48. 빈 곳을 끌어 옮김.
 [AUTO] = 빈 작업 창 · 원곡을 끌어다 놓기 = 그 파일이 들어간 작업 창. 작업 창 [취소] = 이 창으로."""
 from __future__ import annotations
@@ -151,13 +151,12 @@ class StartWindow(QWidget):
             return False
 
     def _auto(self):
-        """[AUTO]: 영상을 재생하고 끝나면 작업 창. 재생 중이면 [건너뛰기]."""
+        """[AUTO]: 영상을 재생하고 끝나면 작업 창. 재생 중 한 번 더 = 건너뛰기."""
         if self._pending is not None:
             return self._go()
         if self.player is None:
             return self.open_work([])
         self._pending = []
-        self.b_auto.setText("건너뛰기")
         self.player.setPosition(0)
         self.player.play()
 
@@ -178,7 +177,6 @@ class StartWindow(QWidget):
             return
         if self.player is not None:
             self.player.pause()
-        self.b_auto.setText("AUTO")
         self.open_work(files)
 
     def _frame(self, f):
@@ -206,10 +204,7 @@ class StartWindow(QWidget):
 
     def mouseReleaseEvent(self, e):
         self._drag = None
-        p0, self._press = self._press, None
-        if (self._pending is not None and p0 is not None and e.position().y() < IMG
-                and (e.globalPosition().toPoint() - p0).manhattanLength() < 5):   # 재생 중 그림 클릭 = 건너뛰기
-            self._go()
+        self._press = None
         super().mouseReleaseEvent(e)
 
     def center(self):
@@ -232,7 +227,6 @@ class StartWindow(QWidget):
             self._pending = None
             if self.player is not None:
                 self.player.pause()
-            self.b_auto.setText("AUTO")
         self.open_work(files)
 
     def hideEvent(self, e):

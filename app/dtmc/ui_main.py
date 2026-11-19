@@ -610,7 +610,8 @@ class WorkWindow(DragMove, QWidget):
                          candidates=int(self.cand.value()), fmt=self.fmt.value(), out_dir=self.out_dir,
                          title=self.title.text().strip(), refs=list(self.refs), style=self.style_key(),
                          caption=self._custom(), src_feel=self.feel.value() == "on",
-                         cpu_lm="1.7B" if hw.profile().mode == "cpu" else "off")
+                         cpu_lm="1.7B" if hw.profile().mode == "cpu" else "off",
+                         quality=prompt.ENGINE_QUALITY.get(self.engine.value(), "std"))
 
     def _out_dir(self) -> Path:
         return Path(self.out_dir) if self.out_dir else paths.default_out_dir()

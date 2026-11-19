@@ -1,5 +1,6 @@
 """원곡 → 분석 → (가짜 엔진) 생성 → 5가지 형식 저장까지 화면 없이 점검. 성공하면 'OK test_pipeline' 출력."""
 import json
+import re
 import os
 import sys
 import tempfile
@@ -60,6 +61,15 @@ print("prompt ok")
 assert len(prompt.STYLES) == 12 and {"anime", "hardrock"} <= set(prompt.STYLE_BY)
 assert prompt.stem("", "", "칠아웃", 1, 60) == "칠아웃_1_1m" and prompt.stem("", "Love Good", "하드록", 2, 95) == "Love_하드록_2_1m35s"
 assert prompt.stem(" 달:밤 ", "x", "로파이", 1, 30) == "달_밤_로파이_1_30s"
+assert prompt.name("chill", 7, "Dive", "", "", 90) == "CHL_007_Dive_1m30s" and prompt.name("anime", 8, "", "", "보컬-지금", 30) == "ANI_008_보컬-지금_30s"
+assert prompt.name("hardrock", 12, "", "Love Good.wav", "", 60) == "ROK_012_Love_1m"
+_p = {k: prompt.preset(q, True) for k, q in prompt.ENGINE_QUALITY.items()}       # 엔진 버튼 → 조합(v0.1.17)
+assert _p["1.7B"]["model"] == prompt.GEN_MODEL and "ACESTEP_LM_MODEL_PATH" not in _p["1.7B"]["env"]
+assert _p["4B"]["model"] == prompt.GEN_MODEL and _p["4B"]["env"]["ACESTEP_LM_MODEL_PATH"] == prompt.LM_4B
+assert _p["XL"]["model"] == prompt.XL_TURBO and "ACESTEP_LM_MODEL_PATH" not in _p["XL"]["env"] and _p["XL"]["opt"] == prompt.XL_OPT
+assert all("ACESTEP_VAE_CHECKPOINT" in v["env"] for v in _p.values())
+_a, _b = jobs.next_seq("pop"), jobs.next_seq("pop")
+assert _b == _a + 1 and jobs.next_seq("jazz") >= 1
 sr = prompt.style_request("anime", seconds=30, bpm=110, key_scale="A major")
 assert "bpm" not in sr and sr["key_scale"] == "A major" and sr["prompt"].startswith("J-Rock anime opening")   # 110 = 범위 밖 → 엔진이 정함
 assert prompt.style_request("anime", seconds=30, bpm=110, force_bpm=True)["bpm"] == 110                        # 직접 정하면 그대로
@@ -91,7 +101,7 @@ for fmt in ("mp3", "flac", "m4a", "ogg", "wav"):
         for it in items:
             p = Path(it["path"])
             assert p.exists() and p.suffix == ff.FORMATS[fmt][0], p
-            assert p.stem.startswith(f"원곡_칠아웃_{it['n']}_15s"), p.name
+            assert re.fullmatch(r"CHL_\d{3}_원곡_15s", p.stem), p.name
             d = ff.duration(p)
             assert 9 < d < 16, (p, d)
         print(fmt, "refs" if refs else "no refs", "ok", [Path(i["path"]).name for i in items])
@@ -117,7 +127,7 @@ assert res.get("ok") and os.path.isabs(r["reference_audio_path"]) and r["task_ty
 plan = jobs.Plan(style="hardrock", length_mode="set", seconds=12, candidates=1, out_dir=str(tmp / "nosrc"))
 res, items = run_job(jobs.MakeJob(engine.Engine(), [], plan))
 r = last_reqs()[0]
-assert res.get("ok") and len(items) == 1 and Path(items[0]["path"]).name == "하드록_1_12s.mp3", (res, items)
+assert res.get("ok") and len(items) == 1 and re.fullmatch(r"ROK_\d{3}_12s\.mp3", Path(items[0]["path"]).name), (res, items)
 assert "bpm" not in r and "key_scale" not in r and r["prompt"].startswith("Hard rock") and items[0]["src_path"] == ""
 # 분석 끔 = 원곡이 있어도 안 씀
 plan = jobs.Plan(style="chill", analyze_on=False, src_feel=True, length_mode="set", seconds=10, out_dir=str(tmp / "out"))
@@ -148,13 +158,13 @@ plan = jobs.Plan(fmt="mp3", out_dir=str(tmp / "cmp"), title="Dive")
 res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan, compare=True))
 assert res.get("ok") and len(items) == 12, (res, len(items))
 names = [Path(i["path"]).name for i in items]
-assert names[0] == "Dive_01-수중 앰비언트_1m.mp3" and names[-1] == "Dive_12-하드록_1m.mp3", names
+assert re.fullmatch(r"AMB_\d{3}_Dive_샘플_1m\.mp3", names[0]) and re.fullmatch(r"ROK_\d{3}_Dive_샘플_1m\.mp3", names[-1]), names
 creq = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:]
 assert len({r["seed"] for r in creq}) == 1 and len({r["prompt"] for r in creq}) == 12
 assert all(r["key_scale"] == "C major" and r["model"] == prompt.GEN_MODEL for r in creq)
 assert "bpm" not in creq[0] and creq[3]["bpm"] in (95, 96, 97) and "bpm" not in creq[10]   # 템포 = 스타일 범위 안일 때만
 res, items = run_job(jobs.MakeJob(engine.Engine(), [], jobs.Plan(out_dir=str(tmp / "cmp2")), compare=True))
-assert res.get("ok") and len(items) == 12 and Path(items[0]["path"]).name == "샘플_01-수중 앰비언트_1m.mp3"
+assert res.get("ok") and len(items) == 12 and re.fullmatch(r"AMB_\d{3}_샘플_1m\.mp3", Path(items[0]["path"]).name)
 hw.gpu = real_gpu
 hw._PROFILE = None
 print("style samples ok", len(names))
@@ -180,8 +190,8 @@ plan = jobs.Plan(style="jazz", length_mode="set", seconds=40, out_dir=str(tmp / 
 res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(long_src))], plan, fit_len=True))
 assert res.get("ok") and len(items) == 4, (res, items)
 names = [Path(i["path"]).name for i in items]
-assert names == ["Dive_길이맞춤1_편집만_40s.mp3", "Dive_길이맞춤2_이음매_40s.mp3", "Dive_길이맞춤3_커버100_40s.mp3",
-                 "Dive_길이맞춤4_커버70_재즈 트리오_40s.mp3"], names
+assert [re.sub(r"^JAZ_\d{3}_", "", x) for x in names] == ["Dive_길이맞춤1-편집만_40s.mp3", "Dive_길이맞춤2-이음매_40s.mp3",
+                                                         "Dive_길이맞춤3-커버100_40s.mp3", "Dive_길이맞춤4-커버70_재즈 트리오_40s.mp3"], names
 assert abs(ff.duration(items[0]["path"]) - 40) < 0.2                        # 편집만 = 실제 소리 길이
 fr = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:]
 assert [("und" if r.get("full_analysis_only") else r["task_type"]) for r in fr] == ["und", "repaint", "cover", "cover"], fr

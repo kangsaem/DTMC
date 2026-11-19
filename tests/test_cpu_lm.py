@@ -69,7 +69,7 @@ rs = json.loads(urllib.request.urlopen(url + "/_requests").read())[-4:]
 assert len({r["seed"] for r in rs}) == 1 and all(r["thinking"] for r in rs) and all(r["audio_duration"] == 30 for r in rs)
 assert [r["lyrics"] == "[Instrumental]" for r in rs] == [False, True, False, True]
 assert rs[0]["prompt"] == rs[1]["prompt"] == prompt.style_caption("anime") and rs[2]["prompt"] == prompt.ANIME_ALT
-assert "애니_Instrumental" in job.outputs[1].name, job.outputs[1].name
+assert job.outputs[1].name.startswith("ANI_") and "보컬-Instrumental" in job.outputs[1].name, job.outputs[1].name
 print("vocal ok")
 
 # 2. 실제 엔진처럼(가짜 엔진 주소 없이): 모델 준비 · 서버가 실제로 읽었는지 확인

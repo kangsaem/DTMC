@@ -70,9 +70,13 @@ def preset(quality: str, big_gpu: bool) -> dict:
     if quality == "hq" and big_gpu:
         return {"quality": "hq", "model": XL_TURBO, "opt": dict(XL_OPT), "env": dict(ENV_VAE)}
     env = dict(ENV_VAE)
-    if big_gpu:
+    if big_gpu and quality != "lm17":              # lm17 = 엔진 [1.7B]: shift3 + 그 기기 작곡 담당(1.7B)
         env.update(ENV_LM4B)
-    return {"quality": "std", "model": GEN_MODEL, "opt": {}, "env": env}
+    return {"quality": "lm17" if quality == "lm17" else "std", "model": GEN_MODEL, "opt": {}, "env": env}
+
+
+# 엔진 버튼(v0.1.17) → preset 품질: 1.7B = shift3 + 작곡 1.7B · 4B = shift3 + 작곡 4B · XL = XL + 작곡 1.7B
+ENGINE_QUALITY = {"1.7B": "lm17", "4B": "std", "XL": "hq"}
 
 
 # ------------------------------------------------------------ 스타일(영상 배경음악용, v0.1.11 샘플 시험)
@@ -303,6 +307,18 @@ def stem(title: str, source_name: str, style_ko: str, tag, seconds) -> str:
     """결과 파일 이름: [제목]_스타일_번호_길이. 제목이 비면 원곡 이름 첫 단어, 원곡도 없으면 스타일만."""
     t = safe(title.strip()) if title and title.strip() else (first_word(source_name) if source_name else "")
     return "_".join(x for x in (t, safe(style_ko), str(tag), len_tag(seconds)) if x)
+
+
+# 파일 이름(v0.1.17): 스타일약어_번호_[제목]_[시험 이름]_길이 — 번호는 스타일마다 이어서 셈(jobs.next_seq)
+STYLE_ABBR = {"ambient": "AMB", "cinematic": "CIN", "chill": "CHL", "tropical": "TRP", "lofi": "LFI", "piano": "PNO",
+              "pop": "POP", "jazz": "JAZ", "epic": "EPC", "synthwave": "SYN", "anime": "ANI", "hardrock": "ROK"}
+
+
+def name(style_key: str, n: int, title: str, source_name: str, label: str, seconds) -> str:
+    """예: CHL_007_Dive_1m30s · ANI_008_Dive_보컬-지금_30s. 제목이 비면 원곡 이름 첫 단어, 원곡도 없으면 뺌."""
+    t = safe(title.strip()) if title and title.strip() else (first_word(source_name) if source_name else "")
+    ab = STYLE_ABBR.get(style_key, safe(style_key)[:3].upper())
+    return "_".join(x for x in (ab, f"{int(n):03d}", t, safe(label) if label else "", len_tag(seconds)) if x)
 
 
 def style_stem(title: str, source_name: str, n: int, style_ko: str, seconds) -> str:

@@ -83,6 +83,15 @@ def write_history(rec: dict) -> None:
 
 
 # ------------------------------------------------------------ 생성 속도(예상 시간)
+def next_seq(style_key: str) -> int:
+    """파일 번호(v0.1.17): 스타일마다 1부터 이어서 셈(설정에 기억)."""
+    seq = dict(settings.get("seq", {}) or {})
+    n = int(seq.get(style_key, 0)) + 1
+    seq[style_key] = n
+    settings.put("seq", seq)
+    return n
+
+
 def mode_key(cpu_lm: str = "off") -> str:
     """속도 기억 이름: gpu · cpu · cpu_0.6B · cpu_1.7B(작곡 담당을 켜면 속도가 달라서 따로)."""
     m = hw.profile().mode
@@ -220,7 +229,7 @@ class MakeJob(QThread):
         self.senv = senv
         self._lm_result(cpu_lm)
         if ps["quality"] == "hq" and not (EG.external_url() or self.eng.dcw):
-            raise EG.EngineError("고품질(XL)은 DCW 를 꺼야 하는데 엔진을 고치지 못했습니다(dtmc.log). 기본 품질로 만드세요.")
+            raise EG.EngineError("고품질(XL)은 DCW 를 꺼야 하는데 엔진을 고치지 못했습니다(dtmc.log). 엔진 [4B] 로 만드세요.")
         if not was:
             settings.put("start_" + mode_key(self.lm_key), round(time.monotonic() - t0, 1))
         self.step.emit("engine", 1.0, "엔진 준비됨" + (f" · 작곡 담당 {self.lm_key}" if self.lm_key != "off" else ""))
@@ -378,7 +387,7 @@ class MakeJob(QThread):
         slab = st[1] + (" · 직접 고침" if (p.caption or "").strip() and p.caption.strip() != st[2] else "")
         saved = []
         for k, w in enumerate(wavs):
-            stem = prompt.stem(p.title, s.name if s is not None else "", st[1], k + 1, sec)
+            stem = prompt.name(st[0], next_seq(st[0]), p.title, s.name if s is not None else "", "", sec)
             dst = unique(out_dir / (stem + ff.FORMATS[p.fmt][0]))
             out = ff.convert(w, dst, p.fmt)
             self.outputs.append(out)
@@ -477,7 +486,7 @@ class MakeJob(QThread):
                         self.eng.start(lambda t: None, self.stopped, extra_env=self.senv)
                     continue
                 remember_speed(sec, time.monotonic() - t0, self.lm_key)
-                stem = prompt.style_stem(p.title, s.name if s is not None else "", i + 1, ko, sec)
+                stem = prompt.name(st[0], next_seq(st[0]), p.title, s.name if s is not None else "", "샘플", sec)
                 out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
                 self.outputs.append(out)
                 self.item.emit({"path": str(out), "source": s.name if s is not None else "",
@@ -535,7 +544,7 @@ class MakeJob(QThread):
                         self.eng.start(lambda t: None, self.stopped, extra_env=self.senv)
                     continue
                 remember_speed(sec, time.monotonic() - t0, self.lm_key)
-                stem = prompt.style_stem(p.title, s.name if s is not None else "보컬시험", no, f"애니_{name}", sec)
+                stem = prompt.name("anime", next_seq("anime"), p.title, s.name if s is not None else "", f"보컬-{name}", sec)
                 out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
                 self.outputs.append(out)
                 self.item.emit({"path": str(out), "source": s.name if s is not None else "",
@@ -579,7 +588,7 @@ class MakeJob(QThread):
         sec = f.length
 
         def save(i, tag, label, wav, req=None, **more):
-            stem = prompt.stem(p.title, s.name, f"길이맞춤{i + 1}", tag, sec)
+            stem = prompt.name(st[0], next_seq(st[0]), p.title, s.name, f"길이맞춤{i + 1}-{tag}", sec)
             out = ff.convert(wav, unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
             self.outputs.append(out)
             self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "label": f"{i + 1}. {label}",

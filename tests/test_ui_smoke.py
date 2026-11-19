@@ -128,7 +128,7 @@ from dtmc.ui_main import ResultRow  # noqa: E402
 rows = w.findChildren(ResultRow)
 assert len(rows) == 4, len(rows)
 for r in rows:
-    assert Path(r.path).exists() and "칠아웃" in Path(r.path).name, r.path
+    assert Path(r.path).exists() and Path(r.path).name.startswith("CHL_"), r.path
     assert not r.b_src.isHidden() and r.src_path          # (방금 넣은 줄은 아직 안 그려졌을 수 있어 isVisible 대신)
 shot(w, "07_work_done.png")
 assert w.b_cancel.isVisible() and w.b_cancel.text() == "폴더 열기" and w.b_start.text() == "돌아가기"
@@ -160,7 +160,7 @@ from PySide6.QtCore import QEvent  # noqa: E402
 app.sendPostedEvents(None, QEvent.DeferredDelete)      # 지난 결과 줄(deleteLater) 정리
 rows = w.findChildren(ResultRow)
 names = sorted(Path(r.path).name for r in rows)
-assert len(names) == 12 and names[0] == "봄날의_01-수중 앰비언트_1m.mp3" and "12-하드록" in names[-1], names
+assert len(names) == 12 and len({n[:3] for n in names}) == 12 and all(n.endswith("_봄날의_샘플_1m.mp3") for n in names), names
 shot(w, "08_samples_done.png")
 w.back_to_setup()
 print("OK test_ui_smoke")
