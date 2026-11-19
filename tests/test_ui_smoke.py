@@ -86,7 +86,8 @@ w.cand.set_value("2")
 w._sync()
 assert w.len_mode.isEnabled() and w.cap.toPlainText().startswith("Chillout") and "자동" in w.cap_note.text()
 shot(w, "04_work_setup.png")
-w.strength.setValue(7)
+w.strength.setValue(12)
+assert w.plan().strength == 60 and w.strength_lab.text() == "60%"
 shot(w, "04b_strength.png")
 w.strength.setValue(0)
 # 스타일 고르기 = 하나만 · 지시문 자동 채움

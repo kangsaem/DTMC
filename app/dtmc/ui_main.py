@@ -21,6 +21,7 @@ L = log.log
 EMPTY_HINT = ("원곡(음원 파일) · 폴더를 여기에 끌어다 놓기 — 없어도 만들 수 있음", "우클릭 = 파일 추가 · 폴더 추가")
 LIST_H = 140                   # 시안 A: 위 띠 원곡 목록 높이(3줄)
 ENGINES = [("1.7B", "1.7B"), ("4B", "4B"), ("XL", "XL")]
+STRENGTH_STEP = 5              # 원곡 반영 슬라이더 단위(%) — 사용자 11/19: 5 단위(55~65% 가 좋을 것 같다고)
 COL_W = 470                    # 설정 한 줄 폭(DTME v0.17.2 자동 창과 같게 — 창 1400×720, 두 줄 다 펼침)
 AUDIO_FILTER = "음원 (" + " ".join(f"*{e} *{e.upper()}" for e in sorted(ff.AUDIO_EXT)) + ")"
 ROLE = Qt.UserRole + 1
@@ -469,12 +470,13 @@ class WorkWindow(DragMove, QWidget):
                            labeled("원곡 반영", self._strength_row()), labeled("음색 참고", self._ref_row())])
 
     def _strength_row(self):
-        """원곡 반영 정도(시안): 0 = 안 씀(원곡 정보만) · 10~100% = 원곡 구성을 따라가는 커버(엔진 cover strength)."""
+        """원곡 반영 정도: 0 = 안 씀(원곡 정보만) · 5~100%(5% 단위, v0.1.19) = 원곡 구성을 따라가는 커버(엔진 cover strength).
+        값 = 슬라이더 칸 × STRENGTH_STEP."""
         self.strength = QSlider(Qt.Horizontal)
-        self.strength.setRange(0, 10)
+        self.strength.setRange(0, 100 // STRENGTH_STEP)
         self.strength.setPageStep(1)
         self.strength.setTickPosition(QSlider.TicksBelow)
-        self.strength.setTickInterval(1)
+        self.strength.setTickInterval(10 // STRENGTH_STEP)            # 눈금 = 10% 마다
         self.strength.setToolTip("0 = 안 씀(지금처럼 원곡의 조성·템포·길이만) · 높을수록 원곡의 멜로디·코드·구성을 더 따라감\n"
                                  "켜면 길이 = 원곡 길이 · 작곡 담당은 쓰지 않음(엔진이 끔) · 70% 이상은 원곡과 많이 닮을 수 있음")
         self.strength_lab = QLabel("")
@@ -586,7 +588,7 @@ class WorkWindow(DragMove, QWidget):
         self.bpm_mode.set_value(c.get("bpm_mode", "src"))
         self.bpm.setValue(int(c.get("bpm", 90)))
         self.feel.set_value("on" if c.get("src_feel") else "off")
-        self.strength.setValue(max(0, min(10, int(c.get("strength", 0) or 0) // 10)))
+        self.strength.setValue(max(0, min(100 // STRENGTH_STEP, int(c.get("strength", 0) or 0) // STRENGTH_STEP)))
         st = c.get("style", prompt.DEFAULT_STYLE)
         self.style.set_value([st if st in prompt.STYLE_BY else prompt.DEFAULT_STYLE])
         self._set_caption(c.get("caption", "") or "")
@@ -603,7 +605,7 @@ class WorkWindow(DragMove, QWidget):
     def _save_cfg(self):
         p = self.plan()
         settings.put("work", {
-            "analyze_on": p.analyze_on, "bpm_mode": self.bpm_mode.value(), "bpm": p.bpm, "src_feel": p.src_feel, "strength": self.strength.value() * 10,
+            "analyze_on": p.analyze_on, "bpm_mode": self.bpm_mode.value(), "bpm": p.bpm, "src_feel": p.src_feel, "strength": self.strength.value() * STRENGTH_STEP,
             "style": p.style, "caption": p.caption, "length_mode": self.len_mode.value(), "seconds": p.seconds,
             "candidates": p.candidates, "engine": self.engine.value(), "fmt": p.fmt, "out_dir": self.out_dir, "refs": self.refs,
         })
@@ -637,7 +639,7 @@ class WorkWindow(DragMove, QWidget):
                          caption=self._custom(), src_feel=self.feel.value() == "on",
                          cpu_lm="1.7B" if hw.profile().mode == "cpu" else "off",
                          quality=prompt.ENGINE_QUALITY.get(self.engine.value(), "std"),
-                         strength=self.strength.value() * 10 if (an and has) else 0)
+                         strength=self.strength.value() * STRENGTH_STEP if (an and has) else 0)
 
     def _out_dir(self) -> Path:
         return Path(self.out_dir) if self.out_dir else paths.default_out_dir()
@@ -688,9 +690,9 @@ class WorkWindow(DragMove, QWidget):
         st = prompt.STYLE_BY[p.style]
         self.strength.setEnabled(use_src)                       # 원곡 반영(v0.1.18) — 원곡이 있고 분석이 켜졌을 때만
         cov = p.strength > 0
-        v = self.strength.value()
-        self.strength_lab.setText("안 씀" if v == 0 else f"{v * 10}%" + (" 주의" if v >= 7 else ""))
-        self.strength_lab.setStyleSheet(f"color:{WARN if v >= 7 and use_src else SUB};")
+        v = self.strength.value() * STRENGTH_STEP
+        self.strength_lab.setText("안 씀" if v == 0 else f"{v}%" + (" 주의" if v >= 70 else ""))
+        self.strength_lab.setStyleSheet(f"color:{WARN if v >= 70 and use_src else SUB};")
         self.bpm_mode.setEnabled(not cov)                       # 커버 = 원곡 템포·조성 그대로
         self.bpm.setEnabled(self.bpm_mode.value() == "set" and not cov)
         self.len_mode.setEnabled(use_src and not cov)           # 원곡이 없거나 안 쓰면 길이는 직접 · 커버 = 원곡 길이
