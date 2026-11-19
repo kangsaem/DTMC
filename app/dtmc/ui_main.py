@@ -20,6 +20,7 @@ from .ui_widgets import (CHK_BG, SUB, SUB_TXT, WARN, Busy, DragMove, Grip, Multi
 L = log.log
 EMPTY_HINT = ("원곡(음원 파일) · 폴더를 여기에 끌어다 놓기 — 없어도 만들 수 있음", "우클릭 = 파일 추가 · 폴더 추가")
 LIST_H = 150                   # 시안 A: 위 띠 원곡 목록 높이(3줄)
+ENGINES = [("1.7B", "1.7B"), ("4B", "4B"), ("XL", "XL")]
 COL_W = 470                    # 설정 한 줄 폭(DTME v0.17.2 자동 창과 같게 — 창 1400×720, 두 줄 다 펼침)
 AUDIO_FILTER = "음원 (" + " ".join(f"*{e} *{e.upper()}" for e in sorted(ff.AUDIO_EXT)) + ")"
 ROLE = Qt.UserRole + 1
@@ -516,27 +517,28 @@ class WorkWindow(DragMove, QWidget):
         lrow.addWidget(self.secs_lab)
         self.cand = Seg([(str(i), f"{i}곡") for i in (1, 2, 3, 4)], str(hw.profile().candidates))
         self.cand.changed.connect(lambda _k: self._sync())
-        # CPU(노트북) 작곡 담당(v0.1.14): 끔(기본) · 0.6B · 1.7B — GPU 는 늘 켜져 있어 안 보임
-        self.cpu_lm = Seg(prompt.CPU_LM, "1.7B")          # v0.1.16: 노트북 기본 1.7B(실기: 끄면 곡이 덜 좋음 · 1.7B 동작 확인)
-        self.cpu_lm.changed.connect(lambda _k: self._sync())
-        self.cpu_lm.setToolTip("작곡 담당(멜로디·구성) — 켜면 곡 구성이 나아질 수 있으나 느려짐.\n"
-                               "0.6B = 처음 쓸 때 받음 · 1.7B = 메모리가 빠듯해 실패할 수 있음(그러면 끈 채로 만듦)\n"
-                               "바꾸면 다음 생성 때 엔진을 다시 켬(몇 분)")
+        # 엔진 고르기(시안): 1.7B = shift3 + 작곡 1.7B · 4B = shift3 + 작곡 4B · XL = XL + 작곡 1.7B
+        big = jobs.xl_ok()
+        self.engine = Seg(ENGINES, "4B" if big else "1.7B")
+        self.engine.changed.connect(lambda _k: self._sync())
+        self.engine.setToolTip("1.7B = 연주 shift3 + 작곡 담당 1.7B\n4B = 연주 shift3 + 작곡 담당 4B(그래픽 메모리 20GB 이상)\n"
+                               "XL = 연주 XL + 작곡 담당 1.7B(그래픽 메모리 20GB 이상 · XL + 4B 는 24GB 에서 실패)\n"
+                               "바꾸면 다음 생성 때 엔진을 다시 켬")
+        for k in ("4B", "XL"):
+            self.engine.btns[k].setEnabled(big)
+            if not big:
+                self.engine.btns[k].setToolTip("이 컴퓨터에서는 못 씀(그래픽 메모리 20GB 이상 필요)")
+        self.cpu_lm = self.engine                              # (예전 이름)
+        erow = QHBoxLayout()
+        erow.setSpacing(8)
+        erow.addWidget(self.engine)
+        erow.addStretch(1)
+        self.erow = erow
         crow2 = QHBoxLayout()
         crow2.setSpacing(8)
         crow2.addWidget(self.cand)
-        if hw.profile().mode == "cpu":
-            lm_lab = QLabel("작곡 담당")
-            lm_lab.setToolTip(self.cpu_lm.toolTip())
-            crow2.addSpacing(16)
-            crow2.addWidget(lm_lab)
-            crow2.addWidget(self.cpu_lm)
-            self.lm_note = None                       # 설명은 말풍선(좁아서 글을 두지 않음)
-            crow2.addStretch(1)
-        else:
-            self.cpu_lm.hide()
-            self.lm_note = None
-            crow2.addStretch(1)
+        crow2.addStretch(1)
+        self.lm_note = None
         self.b_cmp = small_button("스타일 샘플", 96, 28,
                                   f"스타일 {len(prompt.STYLES)}가지를 {prompt.COMPARE_SECONDS}초씩 뽑아 들어 보기(같은 씨앗)")
         self.b_cmp.clicked.connect(self.start_compare)
@@ -555,7 +557,7 @@ class WorkWindow(DragMove, QWidget):
         self.trow = trow                                       # 시험 버튼 = 아래 줄(시안 A2)
         self.crow2 = crow2                                     # 후보 · 작곡 담당 = 출력 칸(시안 A2)
         return self._body([labeled("스타일", self.style), labeled("지시문", self.cap), labeled("", crow),
-                           labeled("길이", lrow)])
+                           labeled("길이", lrow), labeled("엔진", self.erow)])
 
     def _output_body(self) -> QWidget:
         self.fmt = Seg(ff.FORMAT_NAMES, "mp3")
@@ -579,8 +581,8 @@ class WorkWindow(DragMove, QWidget):
         self.title.textChanged.connect(lambda _t: self._sync())
         return self._body([labeled("제목", self.title), labeled("형식", self.fmt), labeled("후보", self.crow2),
                            labeled("저장 폴더", orow),
-                           self._hint("파일 이름 = 제목_스타일_번호_길이(예: Dive_칠아웃_1_1m30s.mp3). 제목을 비우면 "
-                                      "원곡 이름 첫 단어. 같은 이름이 있으면 (2)를 붙입니다.")])
+                           self._hint("파일 이름 = 스타일약어_번호_제목_길이(예: CHL_007_Dive_1m30s.mp3). 번호는 스타일마다 "
+                                      "이어서 셈. 제목을 비우면 원곡 이름 첫 단어.")])
 
     # ================================================================ 설정 기억
     def _load_cfg(self):
@@ -595,7 +597,9 @@ class WorkWindow(DragMove, QWidget):
         self.len_mode.set_value(c.get("length_mode", "src"))
         self.secs.setValue(int(c.get("seconds", 60)))
         self.cand.set_value(str(c.get("candidates", hw.profile().candidates)))
-        self.cpu_lm.set_value(c.get("cpu_lm") if c.get("cpu_lm") in dict(prompt.CPU_LM) else "1.7B")
+        e = c.get("engine")
+        if e in dict(ENGINES) and self.engine.btns[e].isEnabled():
+            self.engine.set_value(e)
         self.fmt.set_value(c.get("fmt", "mp3"))
         self.out_dir = c.get("out_dir", "")
         self.refs = [f for f in (c.get("refs") or []) if f and Path(f).is_file()][: prompt.MAX_REFS]
@@ -605,7 +609,7 @@ class WorkWindow(DragMove, QWidget):
         settings.put("work", {
             "analyze_on": p.analyze_on, "bpm_mode": self.bpm_mode.value(), "bpm": p.bpm, "src_feel": p.src_feel,
             "style": p.style, "caption": p.caption, "length_mode": self.len_mode.value(), "seconds": p.seconds,
-            "candidates": p.candidates, "cpu_lm": p.cpu_lm, "fmt": p.fmt, "out_dir": self.out_dir, "refs": self.refs,
+            "candidates": p.candidates, "engine": self.engine.value(), "fmt": p.fmt, "out_dir": self.out_dir, "refs": self.refs,
         })
 
     def style_key(self) -> str:
@@ -635,7 +639,7 @@ class WorkWindow(DragMove, QWidget):
                          candidates=int(self.cand.value()), fmt=self.fmt.value(), out_dir=self.out_dir,
                          title=self.title.text().strip(), refs=list(self.refs), style=self.style_key(),
                          caption=self._custom(), src_feel=self.feel.value() == "on",
-                         cpu_lm=self.cpu_lm.value() if hw.profile().mode == "cpu" else "off")
+                         cpu_lm="1.7B" if hw.profile().mode == "cpu" else "off")
 
     def _out_dir(self) -> Path:
         return Path(self.out_dir) if self.out_dir else paths.default_out_dir()
@@ -666,13 +670,8 @@ class WorkWindow(DragMove, QWidget):
 
     def _engine_text(self, p) -> str:
         """지금 쓸 엔진 구성(시안 A): 연주 담당 · 작곡 담당 · 음원 변환부 + 켜짐/설치 전."""
-        ps = prompt.preset(p.quality, jobs.xl_ok())
-        gen = {prompt.GEN_MODEL: "shift3"}.get(ps["model"], ps["model"].replace("acestep-v15-", ""))
-        if hw.profile().mode == "cpu":
-            lm = "끔" if p.cpu_lm == "off" else p.cpu_lm
-        else:
-            lm = ps["env"].get("ACESTEP_LM_MODEL_PATH", hw.profile().lm_model).rsplit("-", 1)[-1]
-        vae = "대체" if "ACESTEP_VAE_CHECKPOINT" in ps["env"] else "공식"
+        e = self.engine.value()
+        gen, lm, vae = ("XL" if e == "XL" else "shift3"), ("4B" if e == "4B" else "1.7B"), "대체"
         state = "켜짐" if self.eng.running() else ("꺼짐" if EG.installed() else "설치 전")
         return f"엔진({state}) · 연주 {gen} · 작곡 담당 {lm} · 변환부 {vae}"
 
@@ -698,7 +697,7 @@ class WorkWindow(DragMove, QWidget):
         len_txt = "원곡 길이" if p.length_mode == "src" else mmss(p.seconds)
         custom = bool(p.caption)
         self.stages["generate"].set_summary(f"{st[1]}{'(직접 고침)' if custom else ''} · {len_txt} · 후보 {p.candidates}"
-                                            + (f" · 작곡 담당 {p.cpu_lm}" if p.cpu_lm != "off" else "")
+                                            + f" · 엔진 {self.engine.value()}"
                                             + (" · 음색 참고" if self.refs and not (p.src_feel and use_src) else ""))
         if self.lm_note is not None:
             self.lm_note.setText({"off": "곡 구성이 단순해질 수 있음", "0.6B": "처음 쓸 때 받음",
