@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPlainTextEdit,
+from PySide6.QtWidgets import (QSlider, QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPlainTextEdit,
                                QListWidgetItem, QMenu, QScrollArea, QSizePolicy, QSpinBox, QStyle,
                                QStyledItemDelegate, QVBoxLayout, QWidget)
 
@@ -460,7 +460,23 @@ class WorkWindow(DragMove, QWidget):
                              "켜면 '음색 참고' 칸 대신 원곡을 씁니다. 공개·판매용이면 원곡과 너무 닮지 않았는지 확인하세요.")
         self.feel.changed.connect(lambda _k: self._sync())
         return self._body([self.a_info, labeled("템포", brow), labeled("원곡 소리", grid4([(self.feel, 2), (None, 2)])),
-                           labeled("음색 참고", self._ref_row())])
+                           labeled("원곡 반영", self._strength_row()), labeled("음색 참고", self._ref_row())])
+
+    def _strength_row(self):
+        """원곡 반영 정도(시안): 0 = 안 씀(원곡 정보만) · 10~100% = 원곡 구성을 따라가는 커버(엔진 cover strength)."""
+        self.strength = QSlider(Qt.Horizontal)
+        self.strength.setRange(0, 10)
+        self.strength.setPageStep(1)
+        self.strength.setTickPosition(QSlider.TicksBelow)
+        self.strength.setTickInterval(1)
+        self.strength.setToolTip("0 = 안 씀(지금처럼 원곡의 조성·템포·길이만) · 높을수록 원곡의 멜로디·코드·구성을 더 따라감\n"
+                                 "켜면 길이 = 원곡 길이 · 작곡 담당은 쓰지 않음(엔진이 끔) · 70% 이상은 원곡과 많이 닮을 수 있음")
+        self.strength_lab = QLabel("")
+        self.strength_lab.setStyleSheet(f"color:{SUB};")
+        self.strength.valueChanged.connect(lambda v: (self.strength_lab.setText("안 씀" if v == 0 else f"{v * 10}%"),
+                                                      self._sync()))
+        self.strength_lab.setText("안 씀")
+        return grid4([(self.strength, 3), (self.strength_lab, 1)])
 
     def _ref_row(self):
         self.refs: list[str] = []
@@ -552,11 +568,11 @@ class WorkWindow(DragMove, QWidget):
         orow = grid4([(self.out_lab, 2), (b_ch, 1), (b_open, 1)])
         self.title = QLineEdit()
         self.title.setMaxLength(60)
+        self.title.setToolTip("파일 이름 = 스타일약어_번호_제목_길이(예: CHL_007_Dive_1m30s.mp3). 번호는 스타일마다 이어서 셈. "
+                              "제목을 비우면 원곡 이름 첫 단어.")
         self.title.textChanged.connect(lambda _t: self._sync())
         return self._body([labeled("제목", self.title), labeled("형식", grid4([(self.fmt, 4)])), labeled("후보", self.crow2),
-                           labeled("저장 폴더", orow),
-                           self._hint("파일 이름 = 스타일약어_번호_제목_길이(예: CHL_007_Dive_1m30s.mp3). 번호는 스타일마다 "
-                                      "이어서 셈. 제목을 비우면 원곡 이름 첫 단어.")])
+                           labeled("저장 폴더", orow)])
 
     # ================================================================ 설정 기억
     def _load_cfg(self):
