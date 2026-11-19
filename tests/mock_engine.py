@@ -117,7 +117,11 @@ class H(BaseHTTPRequestHandler):
                 if t["files"] is None:
                     files = []
                     dur = min(12.0, float(t["req"].get("audio_duration") or 10))
-                    for k in range(int(t["req"].get("batch_size") or 1)):
+                    nb = int(t["req"].get("batch_size") or 1)
+                    cap = int(os.environ.get("MOCK_VRAM_CAP") or 0)          # 실제 엔진 VRAM guard 흉내: batch 를 줄임
+                    if cap:
+                        nb = min(nb, cap)
+                    for k in range(nb):
                         p = os.path.join(OUT, f"{tid}_{k}.wav")
                         make_wav(p, dur, 220 * (k + 1))
                         files.append(p)

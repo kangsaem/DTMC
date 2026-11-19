@@ -27,7 +27,9 @@ def setup() -> None:
         s.setLevel(logging.WARNING)
         log.addHandler(s)
     try:
-        _crash = open(d / "crash.log", "a", encoding="utf-8")      # noqa: SIM115 — 끝까지 열어 둠
+        # v0.1.18: 이번 실행은 crash_last.log 에 쓰고, 다음 시작 때 무해한 윈도우 경고를 걸러 crash.log 에 옮김
+        _tidy_crash(d)
+        _crash = open(d / "crash_last.log", "w", encoding="utf-8")      # noqa: SIM115 — 끝까지 열어 둠
         faulthandler.enable(_crash)
     except Exception:  # noqa: BLE001
         pass
@@ -37,6 +39,37 @@ def setup() -> None:
     sys.excepthook = hook
     threading.excepthook = lambda a: log.error("스레드 오류", exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
     log.info("DTMC %s 시작 · Python %s · %s", __version__, sys.version.split()[0], sys.platform)
+
+
+# 프로그램은 계속 도는 윈도우 경고(faulthandler 가 '치명적'처럼 적지만 아님) — 0x8001010d = COM 통신 경고(11/19 실기)
+HARMLESS = ("0x8001010d", "0x8001010e", "0x40010006", "0x406d1388")
+
+
+def filter_crash(text: str) -> str:
+    """faulthandler 기록에서 무해한 윈도우 경고 덩어리를 뺌. 덩어리 = 'Windows fatal exception' · 'Fatal Python error' 줄부터."""
+    out, keep = [], True
+    for line in text.splitlines(keepends=True):
+        if line.startswith(("Windows fatal exception", "Fatal Python error")):
+            keep = not any(c in line for c in HARMLESS)
+        if keep:
+            out.append(line)
+    return "".join(out)
+
+
+def _tidy_crash(d) -> None:
+    """지난 실행 기록(crash_last.log)과 예전 crash.log 에서 무해한 경고를 빼고, 남은 진짜 오류만 crash.log 에."""
+    import time as _t
+    main, last = d / "crash.log", d / "crash_last.log"
+    old = main.read_text(encoding="utf-8", errors="replace") if main.exists() else ""
+    new = last.read_text(encoding="utf-8", errors="replace") if last.exists() else ""
+    kept = filter_crash(new).strip()
+    body = filter_crash(old)
+    if kept:
+        body += f"\n--- {_t.strftime('%Y-%m-%d %H:%M:%S', _t.localtime(last.stat().st_mtime))} 지난 실행 ---\n{kept}\n"
+    if body != old:
+        main.write_text(body, encoding="utf-8")
+    if last.exists():
+        last.unlink()
 
 
 _engine_log = None

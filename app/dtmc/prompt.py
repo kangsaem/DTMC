@@ -314,11 +314,13 @@ STYLE_ABBR = {"ambient": "AMB", "cinematic": "CIN", "chill": "CHL", "tropical": 
               "pop": "POP", "jazz": "JAZ", "epic": "EPC", "synthwave": "SYN", "anime": "ANI", "hardrock": "ROK"}
 
 
-def name(style_key: str, n: int, title: str, source_name: str, label: str, seconds) -> str:
-    """예: CHL_007_Dive_1m30s · ANI_008_Dive_보컬-지금_30s. 제목이 비면 원곡 이름 첫 단어, 원곡도 없으면 뺌."""
+def name(style_key: str, n: int, title: str, source_name: str, label: str, seconds, engine: str = "") -> str:
+    """예: CHL_007_Dive_XL_1m30s · ANI_008_Dive_보컬-지금_4B_30s. 제목이 비면 원곡 이름 첫 단어, 원곡도 없으면 뺌.
+    engine = 엔진 표기(v0.1.18: 1.7B · 4B · XL, 커버류는 shift3 · XL)."""
     t = safe(title.strip()) if title and title.strip() else (first_word(source_name) if source_name else "")
     ab = STYLE_ABBR.get(style_key, safe(style_key)[:3].upper())
-    return "_".join(x for x in (ab, f"{int(n):03d}", t, safe(label) if label else "", len_tag(seconds)) if x)
+    return "_".join(x for x in (ab, f"{int(n):03d}", t, safe(label) if label else "", safe(engine) if engine else "",
+                                len_tag(seconds)) if x)
 
 
 def style_stem(title: str, source_name: str, n: int, style_ko: str, seconds) -> str:
@@ -348,6 +350,22 @@ def repaint_request(src_path, start: float, end: float, caption: str, model=GEN_
     """이음매 다시 그리기: start~end 초만 엔진이 새로 만들고 나머지는 원곡 소리 그대로."""
     return edit_request("repaint", src_path, caption, model, repainting_start=round(float(start), 2),
                         repainting_end=round(float(end), 2), chunk_mask_mode="explicit")
+
+
+def cover_params(pct) -> tuple[float, float]:
+    """원곡 반영(%) → (audio_cover_strength, cover_noise_strength). v0.1.6 A안: 60% 까지 strength 만,
+    60% 초과부터 noise 0 → 0.6(100%) 직선(70% = 0.15 · 90% = 0.45)."""
+    pct = max(0, min(100, int(pct)))
+    return pct / 100.0, (0.0 if pct <= 60 else round(0.6 * (pct - 60) / 40.0, 3))
+
+
+# 다시 입히기(v0.1.18 시험): 실제 연주처럼 들리게 하는 녹음 표현(공식 설명서: 음색·녹음 표현이 믹싱·음색 경향에 영향)
+REAL_PHRASE = "Live recording of real acoustic instruments played by human musicians, natural room sound, warm analog mix."
+
+
+def with_real(caption: str) -> str:
+    c = (caption or "").strip()
+    return (c + " " if c else "") + REAL_PHRASE
 
 
 def cover_request(src_path, caption: str, strength: float, noise: float, model=GEN_MODEL) -> dict:

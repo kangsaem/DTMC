@@ -51,10 +51,11 @@ class Plan:
     caption: str = ""                                # 직접 고친 지시문(비면 스타일 지시문)
     src_feel: bool = False                           # 원곡 느낌 참고 = 원곡 소리를 음색 참고로(멜로디는 안 따라감)
     refs: list = field(default_factory=list)         # 음색 참고 음원(실제 악기 녹음, 최대 3개) — 비우면 안 씀
+    strength: int = 0                                # 원곡 반영(v0.1.18): 0 = 안 씀 · 10~100% = 커버(원곡 구성을 따라감)
     cpu_lm: str = "off"                              # CPU(노트북) 작곡 담당: off · 0.6B · 1.7B(v0.1.14) — GPU 에서는 안 씀
 
     def target_seconds(self, src: Source | None) -> float:
-        if self.length_mode == "src" and src is not None and src.duration:
+        if (self.length_mode == "src" or self.strength > 0) and src is not None and src.duration:
             return prompt.clamp_len(src.duration)
         return prompt.clamp_len(self.seconds)
 
@@ -151,23 +152,25 @@ class MakeJob(QThread):
     finished_ok = Signal(bool, str)
 
     def __init__(self, eng: EG.Engine, sources: list[Source], plan: Plan, test: bool = False,
-                 compare: bool = False, fit_len: bool = False, vocal: bool = False, parent=None):
+                 compare: bool = False, fit_len: bool = False, vocal: bool = False, redo: str = "", parent=None):
         """test = 악기 시험 · compare = 비교 시험(첫 원곡 기준 60초, 같은 씨앗으로 모델만 바꿔 가며)."""
         super().__init__(parent)
         self.eng, self.sources, self.plan, self.test, self.compare = eng, list(sources), plan, test, compare
+        self.redo = redo                           # 다시 입히기 시험(v0.1.18): 이 결과 파일을 원본으로 커버 4가지
         self.vocal = vocal                         # 보컬 시험(v0.1.16): 애니 오프닝 30초 × 가사 칸 · 지시문 4가지
         self.fit_len = fit_len                     # 원곡 길이 맞추기 시험(편집만 / 이음매 다시 그리기 / 커버 2가지)
         self.cancel = False
         self.failed: list[str] = []                # 비교 시험에서 건너뛴 곡(이유)
         self.outputs: list[Path] = []
         self.prof = hw.profile()                   # 이번 작업의 실행 모드(CPU 에서 작곡 담당을 켜면 바뀜)
+        self.short: list[str] = []                 # 곡 수가 모자란 채로 끝난 것(끝 글에 표시)
         self.lm_key = "off"                        # 실제로 켠 CPU 작곡 담당(속도 기억용)
 
     def stopped(self) -> bool:
         return self.cancel
 
     def steps(self) -> list[str]:
-        if self.test or self.compare or self.fit_len or self.vocal:
+        if self.test or self.compare or self.fit_len or self.vocal or self.redo:
             return ["engine", "generate"]
         return ["engine", "analyze", "generate"] if self.plan.analyze_on else ["engine", "generate"]
 
@@ -179,6 +182,7 @@ class MakeJob(QThread):
             took = time.monotonic() - t_all
             self.finished_ok.emit(True, f"{n}곡 저장 · {int(took // 60)}분 {int(took % 60)}초"
                                   + (f" · 작곡 담당 {self.lm_key}" if self.lm_key != "off" else "")
+                                  + (f" · 곡 수 모자람({'; '.join(self.short)[:80]})" if self.short else "")
                                   + (f" · {len(self.failed)}곡 실패(dtmc.log)" if self.failed else ""))
         except EG.Cancelled:
             self.finished_ok.emit(False, "취소했습니다")
@@ -284,6 +288,42 @@ class MakeJob(QThread):
             L.warning("CPU 작곡 담당 %s 를 켜지 못함(서버 로그: %s) → 끈 채로", lm, got or "읽지 못함")
             self.step.emit("engine", 0.0, f"작곡 담당 {k} 를 켜지 못해 끈 채로 만듭니다(메모리 부족일 수 있음 · engine.log)")
 
+    def etag(self, model: str = "") -> str:
+        """파일 이름 엔진 표기(v0.1.18). model 을 주면(커버류 — 작곡 담당 안 씀) 연주 담당 이름 shift3 · XL."""
+        if model:
+            return "XL" if model == prompt.XL_TURBO else ("shift3" if model == prompt.GEN_MODEL else model.rsplit("-", 1)[-1])
+        if hw.profile().mode == "cpu":
+            return self.lm_key if self.lm_key != "off" else "noLM"
+        q = getattr(self, "ps", {}).get("quality", self.plan.quality)
+        if q == "hq":
+            return "XL"
+        lm = self.senv.get("ACESTEP_LM_MODEL_PATH") if getattr(self, "senv", None) else None
+        return (lm or self.prof.lm_model or "noLM").rsplit("-", 1)[-1]
+
+    def _gen_fill(self, req: dict, wd: Path, prog, label: str, frac: float = 0.5) -> list:
+        """요청한 후보 수보다 적게 오면(엔진 VRAM guard 가 남은 그래픽 메모리를 보고 batch 를 줄임, 11/19 로그 확인)
+        모자란 만큼 다시 요청해 채움(최대 2번 · 씨앗은 새로)."""
+        want = int(req.get("batch_size") or 1)
+        wavs = list(self.eng.generate(req, wd, prog, self.stopped))
+        tries = 0
+        while len(wavs) < want and tries < 2 and not self.cancel:
+            tries += 1
+            miss = want - len(wavs)
+            L.warning("엔진이 %d곡 중 %d곡만 만듦(그래픽 메모리 부족 추정) → %d곡 더", want, len(wavs), miss)
+            self.step.emit("generate", frac, f"{label} · 엔진이 그래픽 메모리 부족으로 {len(wavs)}곡만 만듦 → {miss}곡 더 만드는 중")
+            r2 = dict(req, batch_size=miss)
+            r2.pop("seed", None)
+            r2.pop("use_random_seed", None)
+            sub = wd / f"more{tries}"
+            sub.mkdir(parents=True, exist_ok=True)
+            got = self.eng.generate(r2, sub, prog, self.stopped)
+            if not got:
+                break
+            wavs += list(got)
+        if len(wavs) < want:
+            self.short.append(f"{label}: {want}곡 중 {len(wavs)}곡")
+        return wavs[:want]
+
     def _need(self, model: str, frac: float = 0.0, head: str = "", key: str = "generate"):
         """모델이 없으면 내려받음(처음 한 번). 진행 글 = key 단계 막대에."""
         if EG.model_ready(model):
@@ -313,6 +353,8 @@ class MakeJob(QThread):
             return self._run_fit(out_dir)
         if self.vocal:
             return self._run_vocal(out_dir)
+        if self.redo:
+            return self._run_redo(out_dir)
         srcs = [s for s in self.sources if s.checked and not s.error] or [None]      # 원곡은 선택 사항(없으면 스타일만으로)
         if p.analyze_on:
             real = [s for s in srcs if s is not None]
@@ -371,9 +413,19 @@ class MakeJob(QThread):
         wd.mkdir(parents=True, exist_ok=True)
         st = prompt.STYLE_BY.get(p.style, prompt.STYLE_BY[prompt.DEFAULT_STYLE])
         ref = self._ref(wd, s)
-        req = prompt.style_request(st, seconds=sec, bpm=bpm, key_scale=key, ref_path=ref, candidates=p.candidates,
-                                   profile=self.prof, model=self.ps["model"], caption=p.caption, force_bpm=forced,
-                                   **self.ps["opt"])
+        cover = p.strength > 0 and s is not None
+        if cover:                                  # 원곡 반영(v0.1.18) = 커버: 원곡 구성을 따라감 · 길이 = 원곡 · 작곡 담당 안 씀
+            src = ff.make_source(s.path, wd / "src.wav", sec)
+            stg, noise = prompt.cover_params(p.strength)
+            req = prompt.cover_request(src, (p.caption or "").strip() or st[2], stg, noise, self.ps["model"])
+            req.update(self.ps["opt"])
+            req["batch_size"] = max(1, min(4, int(p.candidates)))
+            if ref is not None:
+                req["reference_audio_path"] = str(ref)
+        else:
+            req = prompt.style_request(st, seconds=sec, bpm=bpm, key_scale=key, ref_path=ref, candidates=p.candidates,
+                                       profile=self.prof, model=self.ps["model"], caption=p.caption, force_bpm=forced,
+                                       **self.ps["opt"])
         name = s.name if s is not None else st[1]
         label = f"{i + 1}/{n} {name}"
         t0 = time.monotonic()
@@ -381,13 +433,15 @@ class MakeJob(QThread):
         def prog(f, text):
             el = time.monotonic() - t0
             self.step.emit("generate", (i + min(0.95, max(0.0, f))) / n, f"{label} · {int(el)}초" + (f" · {text[:60]}" if text else ""))
-        wavs = self.eng.generate(req, wd, prog, self.stopped)
+        wavs = self._gen_fill(req, wd, prog, label, (i + 0.9) / n)
         remember_speed(sec * len(wavs), time.monotonic() - t0, self.lm_key)
         self.step.emit("generate", (i + 0.97) / n, f"{label} · 저장")
-        slab = st[1] + (" · 직접 고침" if (p.caption or "").strip() and p.caption.strip() != st[2] else "")
+        slab = st[1] + (" · 직접 고침" if (p.caption or "").strip() and p.caption.strip() != st[2] else "") \
+            + (f" · 원곡 반영 {p.strength}%" if cover else "")
         saved = []
         for k, w in enumerate(wavs):
-            stem = prompt.name(st[0], next_seq(st[0]), p.title, s.name if s is not None else "", "", sec)
+            stem = prompt.name(st[0], next_seq(st[0]), p.title, s.name if s is not None else "",
+                               f"반영{p.strength}" if cover else "", sec, self.etag(self.ps["model"] if cover else ""))
             dst = unique(out_dir / (stem + ff.FORMATS[p.fmt][0]))
             out = ff.convert(w, dst, p.fmt)
             self.outputs.append(out)
@@ -395,7 +449,8 @@ class MakeJob(QThread):
             self.item.emit({"path": str(out), "source": s.name if s is not None else "", "label": slab,
                             "src_path": s.path if s is not None else "", "instr": "", "n": k + 1,
                             "of": len(wavs), "seconds": sec})
-        write_history(self._record(req, s, saved, [], sec, a, style=st[0], src_feel=bool(p.src_feel and s is not None)))
+        write_history(self._record(req, s, saved, [], sec, a, style=st[0], src_feel=bool(p.src_feel and s is not None),
+                                   strength=p.strength if cover else 0))
         self.step.emit("generate", (i + 1) / n, f"{label} 완료")
 
     def _record(self, req: dict, s: Source | None, saved: list, moods: list, sec: float, a=None, **more) -> dict:
@@ -486,7 +541,7 @@ class MakeJob(QThread):
                         self.eng.start(lambda t: None, self.stopped, extra_env=self.senv)
                     continue
                 remember_speed(sec, time.monotonic() - t0, self.lm_key)
-                stem = prompt.name(st[0], next_seq(st[0]), p.title, s.name if s is not None else "", "샘플", sec)
+                stem = prompt.name(st[0], next_seq(st[0]), p.title, s.name if s is not None else "", "샘플", sec, self.etag())
                 out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
                 self.outputs.append(out)
                 self.item.emit({"path": str(out), "source": s.name if s is not None else "",
@@ -544,7 +599,8 @@ class MakeJob(QThread):
                         self.eng.start(lambda t: None, self.stopped, extra_env=self.senv)
                     continue
                 remember_speed(sec, time.monotonic() - t0, self.lm_key)
-                stem = prompt.name("anime", next_seq("anime"), p.title, s.name if s is not None else "", f"보컬-{name}", sec)
+                stem = prompt.name("anime", next_seq("anime"), p.title, s.name if s is not None else "", f"보컬-{name}", sec,
+                                   self.etag())
                 out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
                 self.outputs.append(out)
                 self.item.emit({"path": str(out), "source": s.name if s is not None else "",
@@ -554,6 +610,76 @@ class MakeJob(QThread):
                 self.step.emit("generate", (i + 1) / n, f"{head}{name} 완료")
             if failed and not self.outputs:
                 raise EG.EngineError("보컬 시험이 모두 실패했습니다: " + " / ".join(failed)[:300])
+            self.failed = failed
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _run_redo(self, out_dir: Path):
+        """다시 입히기 시험(v0.1.18): 만든 곡(self.redo)을 원본으로 커버 4가지 — 구성은 따라가고 소리를 새로 그림.
+        1 shift3 1.0 · 2 XL 1.0 + 녹음 표현 · 3 XL 0.7 + 녹음 표현 · 4 XL 1.0 + 녹음 표현 + 음색 참고('음색 참고' 칸이 있을 때만).
+        노이즈 0(원곡 소리에서 출발하지 않음 = 음색을 새로) · 같은 씨앗 · XL 못 쓰는 컴퓨터는 shift3 로. 작곡 담당은 커버에서 안 씀."""
+        p = self.plan
+        src_file = Path(self.redo)
+        if not src_file.is_file():
+            raise EG.EngineError(f"다시 입힐 파일이 없습니다: {src_file}")
+        st = prompt.STYLE_BY.get(p.style, prompt.STYLE_BY[prompt.DEFAULT_STYLE])
+        cap = (p.caption or "").strip() or st[2]
+        big = xl_ok()
+        xl = prompt.XL_TURBO if big else prompt.GEN_MODEL
+        if big:
+            self._need(prompt.XL_TURBO)
+        sec = prompt.clamp_len(ff.duration(src_file))
+        seed = random.randint(1, 2 ** 31 - 1)
+        work = EG.tmp_dir() / time.strftime("redo_%Y%m%d_%H%M%S")
+        work.mkdir(parents=True, exist_ok=True)
+        failed = []
+        try:
+            src = ff.make_source(src_file, work / "src.wav", sec)
+            ref = self._ref(work, None)
+            cases = [(1, "shift3-100", prompt.GEN_MODEL, 1.0, cap, None),
+                     (2, "XL-100-녹음" if big else "shift3-100-녹음", xl, 1.0, prompt.with_real(cap), None),
+                     (3, "XL-70-녹음" if big else "shift3-70-녹음", xl, 0.7, prompt.with_real(cap), None)]
+            if ref is not None:
+                cases.append((4, "XL-100-녹음-음색참고" if big else "shift3-100-녹음-음색참고", xl, 1.0, prompt.with_real(cap), ref))
+            n = len(cases)
+            for i, (no, tag, model, stg, c, rf) in enumerate(cases):
+                if self.cancel:
+                    raise EG.Cancelled("취소했습니다")
+                head = f"{i + 1}/{n} "
+                req = prompt.cover_request(src, c, stg, 0.0, model)
+                if model == prompt.XL_TURBO:
+                    req.update(prompt.XL_OPT)
+                req.update({"use_random_seed": False, "seed": seed})
+                if rf is not None:
+                    req["reference_audio_path"] = str(rf)
+                t0 = time.monotonic()
+
+                def prog(f, text, i=i, tag=tag, t0=t0):
+                    self.step.emit("generate", (i + min(0.95, max(0.0, f))) / n,
+                                   f"{i + 1}/{n} 다시 입히기 {tag} · {int(time.monotonic() - t0)}초")
+                self.step.emit("generate", i / n, f"{head}다시 입히기 {tag}")
+                try:
+                    wavs = self.eng.generate(req, work / f"{no}", prog, self.stopped)
+                except EG.Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001 — 이 곡만 건너뜀
+                    L.warning("다시 입히기 %s 실패: %s", tag, e)
+                    failed.append(f"{tag}: {e}")
+                    self.step.emit("generate", (i + 1) / n, f"{head}{tag} 실패 — 건너뜀")
+                    if not self.eng.running() and not EG.external_url():
+                        self.eng.start(lambda t: None, self.stopped, extra_env=self.senv)
+                    continue
+                stem = prompt.name(st[0], next_seq(st[0]), p.title, "", f"입히기{no}-{tag}", sec, self.etag(model))
+                out = ff.convert(wavs[0], unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
+                self.outputs.append(out)
+                self.item.emit({"path": str(out), "source": src_file.name, "src_path": str(src_file),
+                                "label": f"{no}. 다시 입히기 {tag}", "instr": "", "seed": seed, "n": 1, "of": 1,
+                                "seconds": sec})
+                write_history(self._record(req, None, [str(out)], [], sec, None, kind="redo_test", case=tag,
+                                           redo_src=str(src_file)))
+                self.step.emit("generate", (i + 1) / n, f"{head}{tag} 완료")
+            if failed and not self.outputs:
+                raise EG.EngineError("다시 입히기가 모두 실패했습니다: " + " / ".join(failed)[:300])
             self.failed = failed
         finally:
             shutil.rmtree(work, ignore_errors=True)
@@ -588,7 +714,8 @@ class MakeJob(QThread):
         sec = f.length
 
         def save(i, tag, label, wav, req=None, **more):
-            stem = prompt.name(st[0], next_seq(st[0]), p.title, s.name, f"길이맞춤{i + 1}-{tag}", sec)
+            stem = prompt.name(st[0], next_seq(st[0]), p.title, s.name, f"길이맞춤{i + 1}-{tag}", sec,
+                               "" if i == 0 else self.etag(model))
             out = ff.convert(wav, unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
             self.outputs.append(out)
             self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "label": f"{i + 1}. {label}",

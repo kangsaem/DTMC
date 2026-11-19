@@ -163,7 +163,7 @@ from PySide6.QtCore import QEvent  # noqa: E402
 app.sendPostedEvents(None, QEvent.DeferredDelete)      # 지난 결과 줄(deleteLater) 정리
 rows = w.findChildren(ResultRow)
 names = sorted(Path(r.path).name for r in rows)
-assert len(names) == 12 and len({n[:3] for n in names}) == 12 and all(n.endswith("_봄날의_샘플_1m.mp3") for n in names), names
+assert len(names) == 12 and len({n[:3] for n in names}) == 12 and all("_봄날의_샘플_" in n and n.endswith("_1m.mp3") for n in names), names
 shot(w, "08_samples_done.png")
 w.back_to_setup()
 print("OK test_ui_smoke")

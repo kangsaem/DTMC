@@ -137,6 +137,7 @@ class ResultRow(QWidget):
     """[▶][원곡] 이름 / 아래 작은 글씨 = 원곡 · 악기 · 반영 · 길이 … [폴더]. [원곡] = 같은 위치의 원곡(번갈아 듣기)."""
     play = Signal(object)
     play_src = Signal(object)
+    redo = Signal(object)
 
     def __init__(self, info: dict, parent=None):
         super().__init__(parent)
@@ -173,6 +174,10 @@ class ResultRow(QWidget):
         col.setSpacing(0)
         col.addWidget(name)
         col.addWidget(sub)
+        self.b_redo = small_button("다시 입히기", 92, BTN_H,
+                                   "이 곡을 원본으로 소리를 새로 입혀 4가지로(시험): shift3 · XL + 녹음 표현 · XL 70% · "
+                                   "XL + 음색 참고('음색 참고' 칸이 있을 때). 구성은 따라가고 음색을 실제 연주 쪽으로")
+        self.b_redo.clicked.connect(lambda: self.redo.emit(self))
         b_dir = small_button("폴더", 56, BTN_H, "저장한 곳 열기")
         b_dir.clicked.connect(lambda: open_folder(self.path, select=True))
         h = QHBoxLayout(self)
@@ -181,6 +186,7 @@ class ResultRow(QWidget):
         h.addWidget(self.b_play)
         h.addWidget(self.b_src)
         h.addLayout(col, 1)
+        h.addWidget(self.b_redo)
         h.addWidget(b_dir)
 
     def resizeEvent(self, e):
@@ -473,8 +479,7 @@ class WorkWindow(DragMove, QWidget):
                                  "켜면 길이 = 원곡 길이 · 작곡 담당은 쓰지 않음(엔진이 끔) · 70% 이상은 원곡과 많이 닮을 수 있음")
         self.strength_lab = QLabel("")
         self.strength_lab.setStyleSheet(f"color:{SUB};")
-        self.strength.valueChanged.connect(lambda v: (self.strength_lab.setText("안 씀" if v == 0 else f"{v * 10}%"),
-                                                      self._sync()))
+        self.strength.valueChanged.connect(lambda _v: self._sync())
         self.strength_lab.setText("안 씀")
         return grid4([(self.strength, 3), (self.strength_lab, 1)])
 
@@ -581,6 +586,7 @@ class WorkWindow(DragMove, QWidget):
         self.bpm_mode.set_value(c.get("bpm_mode", "src"))
         self.bpm.setValue(int(c.get("bpm", 90)))
         self.feel.set_value("on" if c.get("src_feel") else "off")
+        self.strength.setValue(max(0, min(10, int(c.get("strength", 0) or 0) // 10)))
         st = c.get("style", prompt.DEFAULT_STYLE)
         self.style.set_value([st if st in prompt.STYLE_BY else prompt.DEFAULT_STYLE])
         self._set_caption(c.get("caption", "") or "")
@@ -597,7 +603,7 @@ class WorkWindow(DragMove, QWidget):
     def _save_cfg(self):
         p = self.plan()
         settings.put("work", {
-            "analyze_on": p.analyze_on, "bpm_mode": self.bpm_mode.value(), "bpm": p.bpm, "src_feel": p.src_feel,
+            "analyze_on": p.analyze_on, "bpm_mode": self.bpm_mode.value(), "bpm": p.bpm, "src_feel": p.src_feel, "strength": self.strength.value() * 10,
             "style": p.style, "caption": p.caption, "length_mode": self.len_mode.value(), "seconds": p.seconds,
             "candidates": p.candidates, "engine": self.engine.value(), "fmt": p.fmt, "out_dir": self.out_dir, "refs": self.refs,
         })
@@ -630,7 +636,8 @@ class WorkWindow(DragMove, QWidget):
                          title=self.title.text().strip(), refs=list(self.refs), style=self.style_key(),
                          caption=self._custom(), src_feel=self.feel.value() == "on",
                          cpu_lm="1.7B" if hw.profile().mode == "cpu" else "off",
-                         quality=prompt.ENGINE_QUALITY.get(self.engine.value(), "std"))
+                         quality=prompt.ENGINE_QUALITY.get(self.engine.value(), "std"),
+                         strength=self.strength.value() * 10 if (an and has) else 0)
 
     def _out_dir(self) -> Path:
         return Path(self.out_dir) if self.out_dir else paths.default_out_dir()
@@ -679,13 +686,19 @@ class WorkWindow(DragMove, QWidget):
         self.feel.setEnabled(bool(cs) and an.on)
         use_src = an.on and bool(cs)
         st = prompt.STYLE_BY[p.style]
-        self.bpm.setEnabled(self.bpm_mode.value() == "set")
-        self.len_mode.setEnabled(use_src)                       # 원곡이 없거나 안 쓰면 길이는 직접
-        self.secs.setEnabled(p.length_mode == "set")
+        self.strength.setEnabled(use_src)                       # 원곡 반영(v0.1.18) — 원곡이 있고 분석이 켜졌을 때만
+        cov = p.strength > 0
+        v = self.strength.value()
+        self.strength_lab.setText("안 씀" if v == 0 else f"{v * 10}%" + (" 주의" if v >= 7 else ""))
+        self.strength_lab.setStyleSheet(f"color:{WARN if v >= 7 and use_src else SUB};")
+        self.bpm_mode.setEnabled(not cov)                       # 커버 = 원곡 템포·조성 그대로
+        self.bpm.setEnabled(self.bpm_mode.value() == "set" and not cov)
+        self.len_mode.setEnabled(use_src and not cov)           # 원곡이 없거나 안 쓰면 길이는 직접 · 커버 = 원곡 길이
+        self.secs.setEnabled(p.length_mode == "set" and not cov)
         self.secs_lab.setText(mmss(self.secs.value()))
-        an.set_summary(("템포 자동" if p.bpm_mode == "src" else f"{p.bpm} BPM")
+        an.set_summary((f"원곡 반영 {p.strength}%" if cov else ("템포 자동" if p.bpm_mode == "src" else f"{p.bpm} BPM"))
                        + (" · 원곡 느낌 참고" if p.src_feel else "") if cs else "원곡 없음 — 스타일만으로")
-        len_txt = "원곡 길이" if p.length_mode == "src" else mmss(p.seconds)
+        len_txt = "원곡 길이" if (p.length_mode == "src" or cov) else mmss(p.seconds)
         custom = bool(p.caption)
         self.stages["generate"].set_summary(f"{st[1]}{'(직접 고침)' if custom else ''} · {len_txt} · 후보 {p.candidates}"
                                             + f" · 엔진 {self.engine.value()}"
@@ -861,6 +874,11 @@ class WorkWindow(DragMove, QWidget):
         if self.mode == "setup":
             self._run(test=False, compare=True)
 
+    def start_redo(self, path: str):
+        """결과 줄 [다시 입히기]: 작업이 끝난 뒤에만(생성 중엔 무시)."""
+        if self.mode == "done" and path and Path(path).is_file():
+            self._run(test=False, redo=path)
+
     def start_vocal(self):
         if self.mode == "setup":
             self._run(test=False, vocal=True)
@@ -894,7 +912,7 @@ class WorkWindow(DragMove, QWidget):
                              [("cancel", "취소", 72, None), ("ok", "내려받고 시작", 110, "blue")])
         return r == "ok"
 
-    def _run(self, test: bool, compare: bool = False, fit_len: bool = False, vocal: bool = False):
+    def _run(self, test: bool, compare: bool = False, fit_len: bool = False, vocal: bool = False, redo: str = ""):
         if not self._ensure_engine():
             return
         if not self._confirm_models(compare):
@@ -903,7 +921,7 @@ class WorkWindow(DragMove, QWidget):
         plan = self.plan()
         self._save_cfg()
         self.job = jobs.MakeJob(self.eng, self.checked(), plan, test=test, compare=compare, fit_len=fit_len,
-                                vocal=vocal, parent=self)
+                                vocal=vocal, redo=redo, parent=self)
         self.job.step.connect(self._on_step)
         self.job.item.connect(self._on_item)
         self.job.finished_ok.connect(self._on_done)
@@ -943,6 +961,7 @@ class WorkWindow(DragMove, QWidget):
         row = ResultRow(info)
         row.play.connect(self.player.toggle)
         row.play_src.connect(self.player.toggle_src)
+        row.redo.connect(lambda r: self.start_redo(r.path))
         self.res_box.insertWidget(self.res_box.count() - 1, row)
         QTimer.singleShot(50, lambda: self.res_scroll.verticalScrollBar().setValue(
             self.res_scroll.verticalScrollBar().maximum()))

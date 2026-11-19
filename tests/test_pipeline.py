@@ -54,7 +54,7 @@ r = prompt.request(instr_keys=["piano"], mood_keys=["calm"], seconds=60, bpm=110
 assert r["task_type"] == "text2music" and r["vocal_language"] == "unknown" and r["lyrics"].startswith("[Intro - soft piano]")
 assert r["reference_audio_path"] == "/r.wav" and r["bpm"] == 110 and r["key_scale"] == "A major"
 assert r["model"] == "acestep-v15-turbo-shift3" and "src_audio_path" not in r and "audio_cover_strength" not in r
-assert not hasattr(jobs.Plan(), "strength")                    # 커버(원곡 반영 %) 삭제
+assert jobs.Plan().strength == 0                                 # 원곡 반영(v0.1.18 다시 넣음) 기본 = 안 씀
 print("prompt ok")
 
 # 스타일 12 · 파일 이름(v0.1.12)
@@ -101,7 +101,7 @@ for fmt in ("mp3", "flac", "m4a", "ogg", "wav"):
         for it in items:
             p = Path(it["path"])
             assert p.exists() and p.suffix == ff.FORMATS[fmt][0], p
-            assert re.fullmatch(r"CHL_\d{3}_원곡_15s", p.stem), p.name
+            assert re.fullmatch(r"CHL_\d{3}_원곡_[^_]+_15s", p.stem), p.name
             d = ff.duration(p)
             assert 9 < d < 16, (p, d)
         print(fmt, "refs" if refs else "no refs", "ok", [Path(i["path"]).name for i in items])
@@ -127,7 +127,7 @@ assert res.get("ok") and os.path.isabs(r["reference_audio_path"]) and r["task_ty
 plan = jobs.Plan(style="hardrock", length_mode="set", seconds=12, candidates=1, out_dir=str(tmp / "nosrc"))
 res, items = run_job(jobs.MakeJob(engine.Engine(), [], plan))
 r = last_reqs()[0]
-assert res.get("ok") and len(items) == 1 and re.fullmatch(r"ROK_\d{3}_12s\.mp3", Path(items[0]["path"]).name), (res, items)
+assert res.get("ok") and len(items) == 1 and re.fullmatch(r"ROK_\d{3}_[^_]+_12s\.mp3", Path(items[0]["path"]).name), (res, items)
 assert "bpm" not in r and "key_scale" not in r and r["prompt"].startswith("Hard rock") and items[0]["src_path"] == ""
 # 분석 끔 = 원곡이 있어도 안 씀
 plan = jobs.Plan(style="chill", analyze_on=False, src_feel=True, length_mode="set", seconds=10, out_dir=str(tmp / "out"))
@@ -158,13 +158,13 @@ plan = jobs.Plan(fmt="mp3", out_dir=str(tmp / "cmp"), title="Dive")
 res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))], plan, compare=True))
 assert res.get("ok") and len(items) == 12, (res, len(items))
 names = [Path(i["path"]).name for i in items]
-assert re.fullmatch(r"AMB_\d{3}_Dive_샘플_1m\.mp3", names[0]) and re.fullmatch(r"ROK_\d{3}_Dive_샘플_1m\.mp3", names[-1]), names
+assert re.fullmatch(r"AMB_\d{3}_Dive_샘플_[^_]+_1m\.mp3", names[0]) and re.fullmatch(r"ROK_\d{3}_Dive_샘플_[^_]+_1m\.mp3", names[-1]), names
 creq = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:]
 assert len({r["seed"] for r in creq}) == 1 and len({r["prompt"] for r in creq}) == 12
 assert all(r["key_scale"] == "C major" and r["model"] == prompt.GEN_MODEL for r in creq)
 assert "bpm" not in creq[0] and creq[3]["bpm"] in (95, 96, 97) and "bpm" not in creq[10]   # 템포 = 스타일 범위 안일 때만
 res, items = run_job(jobs.MakeJob(engine.Engine(), [], jobs.Plan(out_dir=str(tmp / "cmp2")), compare=True))
-assert res.get("ok") and len(items) == 12 and re.fullmatch(r"AMB_\d{3}_샘플_1m\.mp3", Path(items[0]["path"]).name)
+assert res.get("ok") and len(items) == 12 and re.fullmatch(r"AMB_\d{3}_샘플_[^_]+_1m\.mp3", Path(items[0]["path"]).name)
 hw.gpu = real_gpu
 hw._PROFILE = None
 print("style samples ok", len(names))
@@ -190,8 +190,8 @@ plan = jobs.Plan(style="jazz", length_mode="set", seconds=40, out_dir=str(tmp / 
 res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(long_src))], plan, fit_len=True))
 assert res.get("ok") and len(items) == 4, (res, items)
 names = [Path(i["path"]).name for i in items]
-assert [re.sub(r"^JAZ_\d{3}_", "", x) for x in names] == ["Dive_길이맞춤1-편집만_40s.mp3", "Dive_길이맞춤2-이음매_40s.mp3",
-                                                         "Dive_길이맞춤3-커버100_40s.mp3", "Dive_길이맞춤4-커버70_재즈 트리오_40s.mp3"], names
+assert [re.sub(r"^JAZ_\d{3}_", "", x) for x in names] == ["Dive_길이맞춤1-편집만_40s.mp3", "Dive_길이맞춤2-이음매_shift3_40s.mp3",
+                                                         "Dive_길이맞춤3-커버100_shift3_40s.mp3", "Dive_길이맞춤4-커버70_재즈 트리오_shift3_40s.mp3"], names
 assert abs(ff.duration(items[0]["path"]) - 40) < 0.2                        # 편집만 = 실제 소리 길이
 fr = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:]
 assert [("und" if r.get("full_analysis_only") else r["task_type"]) for r in fr] == ["und", "repaint", "cover", "cover"], fr
@@ -207,6 +207,33 @@ assert res.get("ok") is False and "바꿀 것이 없습니다" in res.get("msg",
 hw.gpu = real_gpu
 hw._PROFILE = None
 print("fit ok", names)
+
+# v0.1.18: 곡 수 채우기 · 원곡 반영(커버) · 다시 입히기 · 파일 이름 엔진 표기
+os.environ["MOCK_VRAM_CAP"] = "3"
+n0 = len(json.loads(urllib.request.urlopen(url + "/_requests").read()))
+res, items = run_job(jobs.MakeJob(engine.Engine(), [], jobs.Plan(length_mode="set", seconds=10, candidates=4,
+                                                                  out_dir=str(tmp / "fill"))))
+os.environ.pop("MOCK_VRAM_CAP")
+rq = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:]
+assert res.get("ok") and len(items) == 4 and [r["batch_size"] for r in rq] == [4, 1], (res, [r["batch_size"] for r in rq])
+assert "seed" not in rq[1] and "곡 수 모자람" not in res["msg"]
+assert all(re.search(r"_\d{3}_(4B|1\.7B|0\.6B|noLM)_10s\.mp3$", Path(i["path"]).name) for i in items), [Path(i["path"]).name for i in items]
+n0 = len(json.loads(urllib.request.urlopen(url + "/_requests").read()))
+res, items = run_job(jobs.MakeJob(engine.Engine(), [jobs.Source(str(src))],
+                                  jobs.Plan(strength=70, candidates=2, out_dir=str(tmp / "cov"), title="Dive")))
+r = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:][-1]
+assert res.get("ok") and len(items) == 2 and r["task_type"] == "cover" and r["audio_cover_strength"] == 0.7, (res, r)
+assert r["cover_noise_strength"] == 0.15 and r["batch_size"] == 2 and r["thinking"] is False and "bpm" not in r
+assert re.fullmatch(r"CHL_\d{3}_Dive_반영70_shift3_20s\.mp3", Path(items[0]["path"]).name), items[0]["path"]
+assert prompt.cover_params(50) == (0.5, 0.0) and prompt.cover_params(100) == (1.0, 0.6)
+redo_src = items[0]["path"]
+n0 = len(json.loads(urllib.request.urlopen(url + "/_requests").read()))
+res, items = run_job(jobs.MakeJob(engine.Engine(), [], jobs.Plan(out_dir=str(tmp / "redo"), title="Dive"), redo=redo_src))
+rq = json.loads(urllib.request.urlopen(url + "/_requests").read())[n0:]
+assert res.get("ok") and len(items) == 3 and all(x["task_type"] == "cover" and x["cover_noise_strength"] == 0 for x in rq), res
+assert len({x["seed"] for x in rq}) == 1 and prompt.REAL_PHRASE in rq[1]["prompt"] and prompt.REAL_PHRASE not in rq[0]["prompt"]
+assert [x["audio_cover_strength"] for x in rq] == [1.0, 1.0, 0.7] and "입히기1-shift3-100" in Path(items[0]["path"]).name
+print("v0.1.18 ok")
 
 # 취소
 os.environ["MOCK_DELAY"] = "30"
