@@ -8,8 +8,8 @@ import sys
 
 from PySide6.QtCore import QEvent, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import (QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QAbstractSpinBox, QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+                               QSizePolicy, QVBoxLayout, QWidget)
 
 from . import ui_style
 
@@ -111,6 +111,39 @@ def small_button(text, w=None, h=26, tip=""):
     if tip:
         b.setToolTip(tip)
     return b
+
+
+BTN_H = 30                    # 버튼 규칙(시안): 큰 버튼(AUTO류) = MAIN_H · 나머지 버튼 · 숫자 칸 = 모두 30
+GAP = 5                       # 버튼 사이 간격 = 스타일 격자 · Seg 와 같음
+TEST_W = 120                  # 아래 줄 시험 버튼 폭(모두 같게)
+
+
+def grid4(items) -> QWidget:
+    """설정 칸 한 줄 = 4칸 격자. items = [(위젯 | None, 차지할 칸 수)] — 버튼은 1칸 또는 2칸, Seg 는 버튼 수만큼 칸.
+    격자 간격 = Seg 간격(5) 이라 줄마다 버튼 경계가 스타일 격자와 맞음."""
+    w = QWidget()
+    g = QGridLayout(w)
+    g.setContentsMargins(0, 0, 0, 0)
+    g.setHorizontalSpacing(GAP)
+    for c in range(4):
+        g.setColumnStretch(c, 1)
+        g.setColumnMinimumWidth(c, 1)
+    col = 0
+    for wid, span in items:
+        if wid is not None:
+            if isinstance(wid, (QPushButton, QAbstractSpinBox)):
+                wid.setFixedHeight(BTN_H)
+                wid.setMinimumWidth(1)
+                wid.setMaximumWidth(16777215)
+                wid.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            elif isinstance(wid, QLabel):
+                wid.setMinimumWidth(1)
+                wid.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            else:
+                wid.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            g.addWidget(wid, 0, col, 1, span)
+        col += span
+    return w
 
 
 def no_hfw(lab: QLabel, lines: int = 2) -> QLabel:
