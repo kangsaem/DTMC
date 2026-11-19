@@ -273,6 +273,7 @@ class StageRow(QFrame):
         super().__init__(parent)
         self.key, self.body, self.fixed = key, body, fixed
         self.on, self.open_ = True, False
+        self.locked = False
         self.summary = ""
         self.setObjectName("StageRow")
         self.setStyleSheet("#StageRow{background:#2a2a2a; border:1px solid #3a3a3a; border-radius:3px;}")
@@ -293,6 +294,15 @@ class StageRow(QFrame):
         self.body.setEnabled(self.on)
         self.head.update()
 
+    def set_locked(self, locked: bool):
+        """잠금 = 체크 칸 꺼짐 · 못 누름(설정 칸은 그대로 씀) — 예: 원곡이 없을 때 '분석'."""
+        self.locked = bool(locked)
+        if self.locked:
+            self.on = False
+            self.body.setEnabled(True)
+        self.head.setCursor(Qt.ArrowCursor if self.locked or self.fixed else Qt.PointingHandCursor)
+        self.head.update()
+
     def set_open(self, on: bool):
         """(늘 펼침 — 예전 이름만 남김)"""
         self.open_ = True
@@ -306,7 +316,7 @@ class StageRow(QFrame):
     def eventFilter(self, obj, e):
         if obj is self.head:
             if e.type() == QEvent.MouseButtonPress and e.button() == Qt.LeftButton:
-                if not self.fixed:                 # 머리 줄 아무 데나 누름 = 켬/끔(끈 단계 = 설정 흐림)
+                if not self.fixed and not self.locked:   # 머리 줄 아무 데나 누름 = 켬/끔(끈 단계 = 설정 흐림)
                     self.set_on(not self.on)
                     self.toggled.emit(self.key, self.on)
                 return True

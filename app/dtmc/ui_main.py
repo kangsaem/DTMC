@@ -397,6 +397,12 @@ class WorkWindow(DragMove, QWidget):
         bot = QHBoxLayout()
         bot.setSpacing(8)
         bot.addWidget(self.ver_lab)
+        bot.addSpacing(12)
+        tw = QWidget()
+        tw.setLayout(self.trow)
+        self.trow.setContentsMargins(0, 0, 0, 0)
+        self.test_w = tw
+        bot.addWidget(tw)
         bot.addSpacing(8)
         bot.addWidget(self.state_lab, 1)
         bot.addWidget(self.b_cancel)
@@ -454,8 +460,24 @@ class WorkWindow(DragMove, QWidget):
                              "켜면 '음색 참고' 칸 대신 원곡을 씁니다. 공개·판매용이면 원곡과 너무 닮지 않았는지 확인하세요.")
         self.feel.changed.connect(lambda _k: self._sync())
         return self._body([self.a_info, labeled("템포", brow), labeled("원곡 소리", self.feel),
-                           self._hint("원곡은 없어도 됩니다. 넣으면 조성 · 템포 · 길이를 가져옵니다. "
-                                      "이 단계를 끄면 원곡을 쓰지 않습니다.")])
+                           labeled("음색 참고", self._ref_row())])
+
+    def _ref_row(self):
+        self.refs: list[str] = []
+        self.ref_lab = QLabel("")
+        self.ref_lab.setStyleSheet(f"color:{SUB};")
+        self.ref_lab.setMinimumWidth(1)
+        self.ref_lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        b_ref = small_button("선택", 52, 26, f"잘 녹음된 실제 연주 파일(최대 {prompt.MAX_REFS}개) — 음색·연주 느낌만 참고")
+        b_ref.clicked.connect(self.pick_ref)
+        b_refx = small_button("지움", 52)
+        b_refx.clicked.connect(lambda: self._set_refs([]))
+        rrow = QHBoxLayout()
+        rrow.setSpacing(6)
+        rrow.addWidget(self.ref_lab, 1)
+        rrow.addWidget(b_ref)
+        rrow.addWidget(b_refx)
+        return rrow
 
     def _generate_body(self) -> QWidget:
         self.style = Multi([(k, ko) for k, ko, _c, _r in prompt.STYLES], [prompt.DEFAULT_STYLE], limit=1, cols=4)
@@ -515,20 +537,6 @@ class WorkWindow(DragMove, QWidget):
             self.cpu_lm.hide()
             self.lm_note = None
             crow2.addStretch(1)
-        self.refs: list[str] = []
-        self.ref_lab = QLabel("")
-        self.ref_lab.setStyleSheet(f"color:{SUB};")
-        self.ref_lab.setMinimumWidth(1)
-        self.ref_lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        b_ref = small_button("선택", 52, 26, f"잘 녹음된 실제 연주 파일(최대 {prompt.MAX_REFS}개) — 음색·연주 느낌만 참고")
-        b_ref.clicked.connect(self.pick_ref)
-        b_refx = small_button("지움", 52)
-        b_refx.clicked.connect(lambda: self._set_refs([]))
-        rrow = QHBoxLayout()
-        rrow.setSpacing(6)
-        rrow.addWidget(self.ref_lab, 1)
-        rrow.addWidget(b_ref)
-        rrow.addWidget(b_refx)
         self.b_cmp = small_button("스타일 샘플", 96, 28,
                                   f"스타일 {len(prompt.STYLES)}가지를 {prompt.COMPARE_SECONDS}초씩 뽑아 들어 보기(같은 씨앗)")
         self.b_cmp.clicked.connect(self.start_compare)
@@ -544,9 +552,10 @@ class WorkWindow(DragMove, QWidget):
                                   "③ 지시문 수정 ④ 둘 다 — 노래 같은 소리가 섞이는지 비교")
         self.b_voc.clicked.connect(self.start_vocal)
         trow.addWidget(self.b_voc)
-        trow.addWidget(self._hint("시험용 · 설명 = 마우스"), 1)
+        self.trow = trow                                       # 시험 버튼 = 아래 줄(시안 A2)
+        self.crow2 = crow2                                     # 후보 · 작곡 담당 = 출력 칸(시안 A2)
         return self._body([labeled("스타일", self.style), labeled("지시문", self.cap), labeled("", crow),
-                           labeled("길이", lrow), labeled("후보", crow2), labeled("음색 참고", rrow), trow])
+                           labeled("길이", lrow)])
 
     def _output_body(self) -> QWidget:
         self.fmt = Seg(ff.FORMAT_NAMES, "mp3")
@@ -568,7 +577,8 @@ class WorkWindow(DragMove, QWidget):
         self.title = QLineEdit()
         self.title.setMaxLength(60)
         self.title.textChanged.connect(lambda _t: self._sync())
-        return self._body([labeled("제목", self.title), labeled("형식", self.fmt), labeled("저장 폴더", orow),
+        return self._body([labeled("제목", self.title), labeled("형식", self.fmt), labeled("후보", self.crow2),
+                           labeled("저장 폴더", orow),
                            self._hint("파일 이름 = 제목_스타일_번호_길이(예: Dive_칠아웃_1_1m30s.mp3). 제목을 비우면 "
                                       "원곡 이름 첫 단어. 같은 이름이 있으면 (2)를 붙입니다.")])
 
@@ -671,6 +681,12 @@ class WorkWindow(DragMove, QWidget):
         self.eng_lab.setText(self._engine_text(p))
         an = self.stages["analyze"]
         cs = self.checked()
+        if not cs and not an.locked:                           # 원곡 없음 = 분석 잠금(체크 꺼짐 · 템포 · 음색 참고는 씀)
+            an.set_locked(True)
+        elif cs and an.locked:                                 # 원곡을 넣으면 자동으로 켬
+            an.set_locked(False)
+            an.set_on(True)
+        self.feel.setEnabled(bool(cs) and an.on)
         use_src = an.on and bool(cs)
         st = prompt.STYLE_BY[p.style]
         self.bpm.setEnabled(self.bpm_mode.value() == "set")
@@ -722,6 +738,7 @@ class WorkWindow(DragMove, QWidget):
         self.b_start.setVisible(self.mode != "run")           # 설정 = [AUTO] · 생성 중 = [취소]만 · 끝 = [폴더 열기][돌아가기]
         self.b_cancel.setVisible(self.mode != "setup")
         self.b_cmp.setEnabled(self.mode == "setup")
+        self.test_w.setVisible(self.mode == "setup")
         self.b_fit.setEnabled(self.mode == "setup" and bool(cs))
         self.b_voc.setEnabled(self.mode == "setup")
         if self.mode == "setup":
