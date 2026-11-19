@@ -19,6 +19,7 @@ from .ui_widgets import (CHK_BG, SUB, SUB_TXT, WARN, Busy, DragMove, Grip, Multi
 
 L = log.log
 EMPTY_HINT = ("원곡(음원 파일) · 폴더를 여기에 끌어다 놓기 — 없어도 만들 수 있음", "우클릭 = 파일 추가 · 폴더 추가")
+LIST_H = 150                   # 시안 A: 위 띠 원곡 목록 높이(3줄)
 COL_W = 470                    # 설정 한 줄 폭(DTME v0.17.2 자동 창과 같게 — 창 1400×720, 두 줄 다 펼침)
 AUDIO_FILTER = "음원 (" + " ".join(f"*{e} *{e.upper()}" for e in sorted(ff.AUDIO_EXT)) + ")"
 ROLE = Qt.UserRole + 1
@@ -308,13 +309,13 @@ class WorkWindow(DragMove, QWidget):
         self.list.toggled.connect(self._sync)
         QShortcut(QKeySequence(Qt.Key_Delete), self, activated=self.remove_selected)
         QShortcut(QKeySequence.SelectAll, self, activated=self.list.selectAll)
-        lcol = QVBoxLayout()
-        lcol.setSpacing(4)
-        lcol.addWidget(self.list, 1)
-        # ---- 오른쪽: 실행 모드 · 요약 · 단계 3줄
+        self.list.setFixedHeight(LIST_H)          # 시안 A: 원곡 목록 = 위 띠(3줄 · 스크롤)
+        # ---- 위 띠 오른쪽: 실행 모드 · 엔진 · 요약
         pr = hw.profile()
         self.mode_lab = QLabel(pr.label)
         self.mode_lab.setStyleSheet(f"color:{SUB_TXT};")
+        self.eng_lab = no_hfw(QLabel(""), 2)
+        self.eng_lab.setStyleSheet(f"color:{SUB_TXT};")
         self.warn_lab = no_hfw(QLabel(pr.warn), 2)
         self.warn_lab.setStyleSheet(f"color:{WARN};")
         self.warn_lab.setVisible(bool(pr.warn))
@@ -326,13 +327,21 @@ class WorkWindow(DragMove, QWidget):
             "output": StageRow("output", self._output_body(), fixed=True),
         }
         self.stages["analyze"].toggled.connect(lambda _k, _v: self._sync())
+        info = QVBoxLayout()
+        info.setSpacing(6)
+        info.setContentsMargins(0, 0, 0, 0)
+        info.addWidget(self.mode_lab)
+        info.addWidget(self.eng_lab)
+        info.addWidget(self.warn_lab)
+        info.addWidget(self.sum)
+        info.addStretch(1)
+        band = QHBoxLayout()
+        band.setSpacing(16)
+        band.addWidget(self.list, 6)
+        band.addLayout(info, 5)
         right = QVBoxLayout()
         right.setSpacing(8)
         right.setContentsMargins(0, 0, 0, 0)
-        right.addWidget(self.mode_lab)
-        right.addWidget(self.warn_lab)
-        right.addWidget(self.sum)
-        right.addStretch(1)
         two = QHBoxLayout()                       # DTME v0.17.2 B안과 같은 틀: 두 줄, 늘 다 펼침
         two.setSpacing(10)
         for keys in (("analyze", "output"), ("generate",)):
@@ -372,11 +381,11 @@ class WorkWindow(DragMove, QWidget):
         self.run_w.setLayout(runl)
         self.run_w.setFixedWidth(COL_W * 2 + 10)
         self.run_w.setVisible(False)
-        mid = QHBoxLayout()
-        mid.setSpacing(16)
-        mid.addLayout(lcol, 1)
-        mid.addWidget(self.rw)
-        mid.addWidget(self.run_w)
+        mid = QVBoxLayout()
+        mid.setSpacing(12)
+        mid.addLayout(band)
+        mid.addWidget(self.rw, 1)
+        mid.addWidget(self.run_w, 1)
         # ---- 아래
         self.ver_lab = QLabel(f"DTMC {__version__}")
         self.ver_lab.setStyleSheet("color:#6f6f6f; font-size:11px;")
@@ -404,7 +413,7 @@ class WorkWindow(DragMove, QWidget):
         lay.addLayout(top)
         lay.addLayout(mid, 1)
         lay.addLayout(bot)
-        self.resize(1400, 720)
+        self.resize(COL_W * 2 + 10 + 32, 720)
 
     def _body(self, rows) -> QWidget:
         w = QWidget()
@@ -645,8 +654,21 @@ class WorkWindow(DragMove, QWidget):
     def checked(self) -> list[jobs.Source]:
         return [s for s in self.sources if s.checked and not s.error]
 
+    def _engine_text(self, p) -> str:
+        """지금 쓸 엔진 구성(시안 A): 연주 담당 · 작곡 담당 · 음원 변환부 + 켜짐/설치 전."""
+        ps = prompt.preset(p.quality, jobs.xl_ok())
+        gen = {prompt.GEN_MODEL: "shift3"}.get(ps["model"], ps["model"].replace("acestep-v15-", ""))
+        if hw.profile().mode == "cpu":
+            lm = "끔" if p.cpu_lm == "off" else p.cpu_lm
+        else:
+            lm = ps["env"].get("ACESTEP_LM_MODEL_PATH", hw.profile().lm_model).rsplit("-", 1)[-1]
+        vae = "대체" if "ACESTEP_VAE_CHECKPOINT" in ps["env"] else "공식"
+        state = "켜짐" if self.eng.running() else ("꺼짐" if EG.installed() else "설치 전")
+        return f"엔진({state}) · 연주 {gen} · 작곡 담당 {lm} · 변환부 {vae}"
+
     def _sync(self):
         p = self.plan()
+        self.eng_lab.setText(self._engine_text(p))
         an = self.stages["analyze"]
         cs = self.checked()
         use_src = an.on and bool(cs)

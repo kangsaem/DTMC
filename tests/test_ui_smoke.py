@@ -68,7 +68,7 @@ dlg.close()
 a.open_work([])
 w = a.work
 pump(0.3)
-assert w.size().width() == 1400 and w.size().height() == 720, w.size()
+assert w.size().width() == 982 and w.size().height() == 720, w.size()
 assert all(sr.body.isVisible() for sr in w.stages.values())               # 세 단계 늘 다 펼침(DTME v0.17.2 틀)
 assert w.b_start.isEnabled() and "원곡 없이" in w.sum.text() and not w.len_mode.isEnabled()
 assert w.plan().length_mode == "set" and w.plan().style == "chill"
