@@ -313,9 +313,11 @@ class WorkWindow(DragMove, QWidget):
         self.list.setFixedHeight(LIST_H)          # 시안 A: 원곡 목록 = 위 띠(3줄 · 스크롤)
         # ---- 위 띠 오른쪽: 실행 모드 · 엔진 · 요약
         pr = hw.profile()
-        self.mode_lab = QLabel(pr.label)
+        self.mode_lab = no_hfw(QLabel(pr.label), 1)
+        self.mode_lab.setMinimumWidth(1)
         self.mode_lab.setStyleSheet(f"color:{SUB_TXT};")
         self.eng_lab = no_hfw(QLabel(""), 2)
+        self.eng_lab.setMinimumWidth(1)
         self.eng_lab.setStyleSheet(f"color:{SUB_TXT};")
         self.warn_lab = no_hfw(QLabel(pr.warn), 2)
         self.warn_lab.setStyleSheet(f"color:{WARN};")
@@ -390,7 +392,8 @@ class WorkWindow(DragMove, QWidget):
         # ---- 아래
         self.ver_lab = QLabel(f"DTMC {__version__}")
         self.ver_lab.setStyleSheet("color:#6f6f6f; font-size:11px;")
-        self.state_lab = QLabel("")
+        self.state_lab = no_hfw(QLabel(""), 2)              # 긴 글이 창 최소 폭을 늘리지 않게(윈도우 글꼴이 더 넓음)
+        self.state_lab.setMinimumWidth(1)
         self.b_cancel = main_button("취소")
         self.b_cancel.clicked.connect(self.cancel)
         self.b_start = main_button("AUTO", "red")
