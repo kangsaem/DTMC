@@ -456,7 +456,7 @@ class WorkWindow(DragMove, QWidget):
         self.feel.setToolTip("원곡 소리에서 음색·분위기만 참고합니다(멜로디는 따라가지 않음). "
                              "켜면 '음색 참고' 칸 대신 원곡을 씁니다. 공개·판매용이면 원곡과 너무 닮지 않았는지 확인하세요.")
         self.feel.changed.connect(lambda _k: self._sync())
-        return self._body([self.a_info, labeled("템포", brow), labeled("원곡 소리", grid4([(self.feel, 4)])),
+        return self._body([self.a_info, labeled("템포", brow), labeled("원곡 소리", grid4([(self.feel, 2), (None, 2)])),
                            labeled("음색 참고", self._ref_row())])
 
     def _ref_row(self):
@@ -469,7 +469,7 @@ class WorkWindow(DragMove, QWidget):
         b_ref.clicked.connect(self.pick_ref)
         b_refx = small_button("지움")
         b_refx.clicked.connect(lambda: self._set_refs([]))
-        return grid4([(self.ref_lab, 2), (b_ref, 1), (b_refx, 1)])
+        return grid4([(b_ref, 1), (b_refx, 1), (self.ref_lab, 2)])
 
     def _generate_body(self) -> QWidget:
         self.style = Multi([(k, ko) for k, ko, _c, _r in prompt.STYLES], [prompt.DEFAULT_STYLE], limit=1, cols=4)
@@ -682,7 +682,7 @@ class WorkWindow(DragMove, QWidget):
         if p.src_feel and use_src:
             rt = "원곡 느낌 참고를 켜서 원곡을 씁니다"
         elif not self.refs:
-            rt = "없음"
+            rt = ""
         else:
             rt = Path(self.refs[0]).name + (f" 외 {len(self.refs) - 1}개" if len(self.refs) > 1 else "")
         self.ref_lab.setText(self.ref_lab.fontMetrics().elidedText(rt, Qt.ElideMiddle, 250))
