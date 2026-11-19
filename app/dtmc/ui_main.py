@@ -316,7 +316,7 @@ class WorkWindow(DragMove, QWidget):
         self.mode_lab = no_hfw(QLabel(pr.label), 1)
         self.mode_lab.setMinimumWidth(1)
         self.mode_lab.setStyleSheet(f"color:{SUB_TXT};")
-        self.eng_lab = no_hfw(QLabel(""), 2)
+        self.eng_lab = no_hfw(QLabel(""), 1)
         self.eng_lab.setMinimumWidth(1)
         self.eng_lab.setStyleSheet(f"color:{SUB_TXT};")
         self.warn_lab = no_hfw(QLabel(pr.warn), 2)
