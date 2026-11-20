@@ -69,7 +69,7 @@ a.open_work([])
 w = a.work
 pump(0.3)
 assert w.size().width() == 982 and w.size().height() == 720, w.size()
-assert all(sr.body.isVisible() for sr in w.stages.values())               # 세 단계 늘 다 펼침(DTME v0.17.2 틀)
+assert all(sr.body.isVisible() for k, sr in w.stages.items() if k in ("analyze", "generate", "output"))               # 세 단계 늘 다 펼침(DTME v0.17.2 틀)
 assert w.b_start.isEnabled() and "원곡 없이" in w.sum.text() and not w.len_mode.isEnabled()
 assert w.plan().length_mode == "set" and w.plan().style == "chill"
 shot(w, "03_work_empty.png")
@@ -92,10 +92,9 @@ shot(w, "04b_strength.png")
 w.strength.setValue(0)
 # 후보정 시안 화면
 w.work.set_value("post"); w._work_changed()
-w.post["vocals"].set_value("mute"); w.post["denoise"].set_value("low"); w.post["clean"].set_value(["loud", "low"]); w._post_sum()
-for k in ("edit", "sound", "inst", "fix"):
-    w.post_tab.set_value(k); w.post_pages.setCurrentIndex(["edit", "sound", "inst", "fix"].index(k))
-    shot(w, f"post_{k}.png")
+w.post["vocals"].set_value("mute"); w.post["denoise"].set_value("low"); w.post["clean"].set_value(["loud", "low"])
+w.post["cut"].set_value(["trim"]); w.post["fade_out"].setValue(3); w._post_sum()
+QApplication.processEvents(); QApplication.processEvents(); shot(w, "post_all.png")
 w.work.set_value("new"); w._work_changed()
 # 스타일 고르기 = 하나만 · 지시문 자동 채움
 w.style.btns["jazz"].click()
