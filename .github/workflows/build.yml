@@ -125,6 +125,10 @@ jobs:
           Write-Output $o
           if ($o -notmatch "OK test_cpu_lm") { exit 1 }
           $global:LASTEXITCODE = 0
+          $o = python -X faulthandler tests/test_post.py 2>&1 | Out-String
+          Write-Output $o
+          if ($o -notmatch "OK test_post") { exit 1 }
+          $global:LASTEXITCODE = 0
           $o = python -X faulthandler tests/test_ui_smoke.py 2>&1 | Out-String
           Write-Output $o
           if ($o -notmatch "OK test_ui_smoke") { exit 1 }

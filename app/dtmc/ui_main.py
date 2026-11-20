@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QSlider, QAbstractItemView, QFileDialog, QHBoxLay
                                QListWidgetItem, QMenu, QScrollArea, QSizePolicy, QSpinBox, QStyle,
                                QStackedWidget, QStyledItemDelegate, QVBoxLayout, QWidget)
 
+from . import post as PO
 from . import __version__, engine as EG, ff, hw, jobs, log, paths, prompt, settings, taskbar, ui_style
 from .ui_widgets import (CHK_BG, SUB, SUB_TXT, WARN, Busy, DragMove, Grip, Multi, Seg, StageRow, StepBar,
                          BTN_H, TEST_W, grid4, labeled, main_button, no_hfw, open_folder, small_button)
@@ -306,6 +307,7 @@ class WorkWindow(DragMove, QWidget):
         self._ticker.start()
         self._build()
         self._load_cfg()
+        self._load_post()
         self._sync()
 
     # ================================================================ 화면
@@ -740,6 +742,29 @@ class WorkWindow(DragMove, QWidget):
                            labeled("저장 폴더", orow)])
 
     # ================================================================ 설정 기억
+    def _load_post(self):
+        """후보정 설정 · 작업(새로 만들기 | 후보정) 되살리기."""
+        c = settings.get("post", {}) or {}
+        P = self.post
+        try:
+            for k in ("fade_in", "fade_out", "fit_s", "tempo", "key", "rp_a", "rp_b", "ext_s"):
+                if k in c:
+                    P[k].setValue(int(c[k]))
+            for k in ("fit", "denoise", "space", "vocals", "drums", "bass", "other"):
+                if k in c:
+                    P[k].set_value(c[k])
+            for k in ("stems", "repaint", "redo", "extend"):
+                if k in c:
+                    P[k].set_value("on" if c[k] else "off")
+            for k in ("cut", "clean"):
+                if k in c:
+                    P[k].set_value(list(c[k]))
+        except Exception as e:  # noqa: BLE001
+            L.warning("후보정 설정 되살리기 실패: %s", e)
+        if settings.get("job_mode") == "post":
+            self.work.set_value("post")
+            self._work_changed()
+
     def _load_cfg(self):
         c = self.cfg
         self.stages["analyze"].set_on(c.get("analyze_on", True))
@@ -762,6 +787,9 @@ class WorkWindow(DragMove, QWidget):
 
     def _save_cfg(self):
         p = self.plan()
+        import dataclasses as _dc
+        settings.put("post", _dc.asdict(self.post_plan()))
+        settings.put("job_mode", self.work.value())
         settings.put("work", {
             "analyze_on": p.analyze_on, "bpm_mode": self.bpm_mode.value(), "bpm": p.bpm, "src_feel": p.src_feel, "strength": self.strength.value() * STRENGTH_STEP,
             "style": p.style, "caption": p.caption, "length_mode": self.len_mode.value(), "seconds": p.seconds,
@@ -1073,16 +1101,39 @@ class WorkWindow(DragMove, QWidget):
                              [("cancel", "취소", 72, None), ("ok", "내려받고 시작", 110, "blue")])
         return r == "ok"
 
+    def post_plan(self) -> "PO.Post":
+        """후보정 화면 설정 → Post."""
+        P = self.post
+        return PO.Post(cut=list(P["cut"].value()), fade_in=P["fade_in"].value(), fade_out=P["fade_out"].value(),
+                       fit=P["fit"].value(), fit_s=P["fit_s"].value(), tempo=P["tempo"].value(), key=P["key"].value(),
+                       denoise=P["denoise"].value(), clean=list(P["clean"].value()), space=P["space"].value(),
+                       vocals=P["vocals"].value(), drums=P["drums"].value(), bass=P["bass"].value(),
+                       other=P["other"].value(), stems=P["stems"].value() == "on",
+                       repaint=P["repaint"].value() == "on", rp_a=P["rp_a"].value(), rp_b=P["rp_b"].value(),
+                       redo=P["redo"].value() == "on", extend=P["extend"].value() == "on", ext_s=P["ext_s"].value())
+
     def _run(self, test: bool, compare: bool = False, fit_len: bool = False, vocal: bool = False, redo: str = ""):
-        if not self._ensure_engine():
-            return
-        if not self._confirm_models(compare):
-            return
+        post = self.post_plan() if (self.work.value() == "post" and not (test or compare or fit_len or vocal or redo)) \
+            else None
+        if post is not None:
+            if not self.checked():
+                ui_style.notice(self, "후보정할 파일을 원곡 칸에 넣으세요(만든 곡을 다시 넣어도 됩니다).")
+                return
+            if not post.any_on():
+                ui_style.notice(self, "켠 후보정이 없습니다.\n편집 · 음향 · 악기 · 고치기에서 필요한 것을 켜세요.")
+                return
+            if (post.fix_on() or post.inst_on()) and not self._ensure_engine():
+                return
+        else:
+            if not self._ensure_engine():
+                return
+            if not self._confirm_models(compare):
+                return
         self.player.stop()
         plan = self.plan()
         self._save_cfg()
         self.job = jobs.MakeJob(self.eng, self.checked(), plan, test=test, compare=compare, fit_len=fit_len,
-                                vocal=vocal, redo=redo, parent=self)
+                                vocal=vocal, redo=redo, post=post, parent=self)
         self.job.step.connect(self._on_step)
         self.job.item.connect(self._on_item)
         self.job.finished_ok.connect(self._on_done)

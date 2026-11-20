@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+from . import post as PO
 from . import analyze, engine as EG, ff, fit, hw, log, paths, prompt, settings
 
 L = log.log
@@ -84,6 +85,18 @@ def write_history(rec: dict) -> None:
 
 
 # ------------------------------------------------------------ 생성 속도(예상 시간)
+def _vram_err(e) -> bool:
+    t = str(e)
+    return "VRAM" in t or "out of memory" in t.lower() or "Insufficient free" in t
+
+
+def _short_err(e) -> str:
+    """끝 글용 짧은 이유(한국어)."""
+    if _vram_err(e):
+        return "그래픽 메모리 부족 — 길이를 줄이거나 후보 1곡 · 엔진 4B/1.7B 로"
+    return str(e).splitlines()[0][:80]
+
+
 def next_seq(style_key: str) -> int:
     """파일 번호(v0.1.17): 스타일마다 1부터 이어서 셈(설정에 기억)."""
     seq = dict(settings.get("seq", {}) or {})
@@ -152,10 +165,12 @@ class MakeJob(QThread):
     finished_ok = Signal(bool, str)
 
     def __init__(self, eng: EG.Engine, sources: list[Source], plan: Plan, test: bool = False,
-                 compare: bool = False, fit_len: bool = False, vocal: bool = False, redo: str = "", parent=None):
+                 compare: bool = False, fit_len: bool = False, vocal: bool = False, redo: str = "",
+                 post: "PO.Post | None" = None, parent=None):
         """test = 악기 시험 · compare = 비교 시험(첫 원곡 기준 60초, 같은 씨앗으로 모델만 바꿔 가며)."""
         super().__init__(parent)
         self.eng, self.sources, self.plan, self.test, self.compare = eng, list(sources), plan, test, compare
+        self.post = post                           # 후보정(v0.1.20): 원곡 칸 파일을 손질만(새로 만들지 않음)
         self.redo = redo                           # 다시 입히기 시험(v0.1.18): 이 결과 파일을 원본으로 커버 4가지
         self.vocal = vocal                         # 보컬 시험(v0.1.16): 애니 오프닝 30초 × 가사 칸 · 지시문 4가지
         self.fit_len = fit_len                     # 원곡 길이 맞추기 시험(편집만 / 이음매 다시 그리기 / 커버 2가지)
@@ -170,6 +185,8 @@ class MakeJob(QThread):
         return self.cancel
 
     def steps(self) -> list[str]:
+        if self.post is not None:
+            return (["engine"] if self.post.fix_on() else []) + ["post"]
         if self.test or self.compare or self.fit_len or self.vocal or self.redo:
             return ["engine", "generate"]
         return ["engine", "analyze", "generate"] if self.plan.analyze_on else ["engine", "generate"]
@@ -304,7 +321,25 @@ class MakeJob(QThread):
         """요청한 후보 수보다 적게 오면(엔진 VRAM guard 가 남은 그래픽 메모리를 보고 batch 를 줄임, 11/19 로그 확인)
         모자란 만큼 다시 요청해 채움(최대 2번 · 씨앗은 새로)."""
         want = int(req.get("batch_size") or 1)
-        wavs = list(self.eng.generate(req, wd, prog, self.stopped))
+        try:
+            wavs = list(self.eng.generate(req, wd, prog, self.stopped))
+        except EG.Cancelled:
+            raise
+        except EG.EngineError as e:
+            # v0.1.20: 엔진이 그래픽 메모리 부족으로 아예 거부(VRAM pre-flight) → 한 곡씩 나눠 다시
+            if not _vram_err(e) or want <= 1:
+                raise
+            L.warning("그래픽 메모리 부족으로 %d곡 한 번에 거부 → 한 곡씩: %s", want, e)
+            self.step.emit("generate", frac, f"{label} · 그래픽 메모리 부족 → 한 곡씩 나눠 만드는 중")
+            wavs = []
+            for k in range(want):
+                sub = wd / f"one{k}"
+                sub.mkdir(parents=True, exist_ok=True)
+                r1 = dict(req, batch_size=1)
+                if k:
+                    r1.pop("seed", None)
+                    r1.pop("use_random_seed", None)
+                wavs += list(self.eng.generate(r1, sub, prog, self.stopped))
         tries = 0
         while len(wavs) < want and tries < 2 and not self.cancel:
             tries += 1
@@ -344,6 +379,8 @@ class MakeJob(QThread):
     def _run(self):
         p = self.plan
         out_dir = self._out_dir()
+        if self.post is not None:
+            return self._run_post(out_dir)
         self._engine()
         if self.test:
             return self._run_test(out_dir)
@@ -369,7 +406,21 @@ class MakeJob(QThread):
         work = EG.tmp_dir() / time.strftime("job_%Y%m%d_%H%M%S")
         try:
             for i, s in enumerate(srcs):
-                self._make_one(i, len(srcs), s, work, out_dir)
+                try:
+                    self._make_one(i, len(srcs), s, work, out_dir)
+                except EG.Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001 — v0.1.20: 원곡 하나가 실패해도 나머지는 계속
+                    if len(srcs) == 1:
+                        raise
+                    nm = s.name if s is not None else "스타일"
+                    L.warning("%s 생성 실패 → 건너뜀: %s", nm, e)
+                    self.failed.append(f"{nm}: {_short_err(e)}")
+                    self.step.emit("generate", (i + 1) / len(srcs), f"{nm} 실패 — 건너뜀({_short_err(e)})")
+                    if not self.eng.running() and not EG.external_url():
+                        self.eng.start(lambda t: None, self.stopped, extra_env=self.senv)
+            if self.failed and not self.outputs:
+                raise EG.EngineError("모두 실패했습니다: " + " / ".join(self.failed)[:300])
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -613,6 +664,145 @@ class MakeJob(QThread):
             self.failed = failed
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+    def _run_post(self, out_dir: Path):
+        """후보정(v0.1.20): 원곡 칸의 각 파일에 켠 것만 차례로 — 악기 → 고치기 → 편집 → 음향. 새로 작곡하지 않음.
+        원본은 그대로 두고 결과는 '원래이름_보컬뺌_다듬기' 처럼 새 파일. 한 파일이 실패해도 나머지는 계속."""
+        po = self.post
+        srcs = [s for s in self.sources if s.checked and not s.error]
+        if not srcs:
+            raise EG.EngineError("후보정할 파일이 없습니다. 원곡 칸에 파일을 넣으세요.")
+        if not po.any_on():
+            raise EG.EngineError("켠 후보정이 없습니다. 편집 · 음향 · 악기 · 고치기에서 필요한 것을 켜세요.")
+        if po.inst_on() and not (EG.installed() or EG.external_url()):
+            raise EG.EngineError("악기 빼기는 엔진 폴더를 씁니다. '새로 만들기'로 한 번 만들어 엔진을 먼저 설치하세요.")
+        if po.fix_on():
+            self._engine()
+        work = EG.tmp_dir() / time.strftime("post_%Y%m%d_%H%M%S")
+        work.mkdir(parents=True, exist_ok=True)
+        n = len(srcs)
+        line = lambda t: None  # noqa: E731
+        try:
+            for i, s in enumerate(srcs):
+                if self.cancel:
+                    raise EG.Cancelled("취소했습니다")
+                head = f"{i + 1}/{n} {s.name}"
+                wd = work / f"{i}"
+                wd.mkdir(parents=True, exist_ok=True)
+                try:
+                    out = self._post_one(s, wd, out_dir, head, i, n, line)
+                except EG.Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    if n == 1:
+                        raise
+                    L.warning("후보정 실패 %s: %s", s.name, e)
+                    self.failed.append(f"{s.name}: {_short_err(e)}")
+                    self.step.emit("post", (i + 1) / n, f"{head} 실패 — 건너뜀")
+                    continue
+                self.outputs.append(out)
+                self.item.emit({"path": str(out), "source": s.name, "src_path": s.path, "label": "후보정 · " + po.summary(),
+                                "instr": "", "seed": None, "n": 1, "of": 1, "seconds": ff.duration(out)})
+                write_history({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": "post", "source": s.path,
+                               "outputs": [str(out)], "post": dataclasses.asdict(po)})
+                self.step.emit("post", (i + 1) / n, f"{head} 완료")
+            if self.failed and not self.outputs:
+                raise EG.EngineError("모두 실패했습니다: " + " / ".join(self.failed)[:300])
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _post_one(self, s: "Source", wd: Path, out_dir: Path, head: str, i: int, n: int, line) -> Path:
+        po, p = self.post, self.plan
+        k = 0
+
+        def nxt(tag):
+            nonlocal k
+            k += 1
+            return wd / f"{k:02d}_{tag}.wav"
+
+        def say(f, t):
+            self.step.emit("post", (i + max(0.0, min(0.99, f))) / n, f"{head} · {t}")
+        cur = PO.to_wav(s.path, nxt("src"))
+        stem_files = {}
+        # 1. 악기
+        if po.inst_on():
+            say(0.05, "음원 분리 프로그램 준비(처음 한 번 설치)" if not PO.demucs_ready() else "악기 나누는 중")
+            PO.ensure_demucs(line, self.stopped)
+            say(0.1, "악기 나누는 중")
+            stem_files = PO.separate(cur, wd / "stems", line, self.stopped)
+            if any(getattr(po, x) != "keep" for x in PO.STEMS):
+                cur = PO.remix(stem_files, po, nxt("remix"))
+        # 2. 고치기(엔진)
+        if po.fix_on():
+            cur = self._post_fix(cur, wd, say)
+        # 3. 편집
+        if "trim" in po.cut:
+            say(0.7, "무음 자르기")
+            cur = PO.trim_silence(cur, nxt("trim"))
+        if po.fit == "set":
+            say(0.72, f"길이 {po.fit_s}초로")
+            a = s.analysis or analyze.analyze_file(s.path)
+            f = fit.plan_file(cur, a.bpm, float(po.fit_s))
+            if f.changed():
+                cur = ff.arrange(cur, f.segments, nxt("fit"))
+        if "bar" in po.cut:
+            a = s.analysis or analyze.analyze_file(s.path)
+            cur = PO.end_at_bar(cur, nxt("bar"), a.bpm)
+        if "loop" in po.cut:
+            say(0.75, "루프 만들기")
+            cur = PO.make_loop(cur, nxt("loop"))
+        if po.tempo or po.key:
+            say(0.78, "빠르기 · 조")
+            cur = PO.tempo_key(cur, nxt("tk"), po.tempo, po.key)
+        if po.fade_in or po.fade_out:
+            cur = PO.fades(cur, nxt("fade"), po.fade_in, po.fade_out)
+        # 4. 음향
+        if po.sound_on():
+            say(0.85, "음향 다듬기")
+            cur = PO._af(cur, nxt("sound"), PO.sound_chain(po), "음향 다듬기")
+        # 저장
+        say(0.95, "저장")
+        stem = prompt.safe(Path(s.path).stem) + "_" + po.tag()
+        out = ff.convert(cur, unique(out_dir / (stem + ff.FORMATS[p.fmt][0])), p.fmt)
+        if po.stems and stem_files:
+            for nm, f in stem_files.items():
+                ff.convert(f, unique(out_dir / (prompt.safe(Path(s.path).stem) + f"_{PO.STEM_KO[nm]}" + ff.FORMATS[p.fmt][0])), p.fmt)
+        return out
+
+    def _post_fix(self, cur: Path, wd: Path, say) -> Path:
+        """고치기: 부분 다시(repaint) → 다시 입히기(cover 1.0 · 노이즈 0 · 녹음 표현) → 이어 만들기(repaint 로 뒤를 늘림).
+        엔진 = '새로 만들기'에서 고른 엔진의 연주 담당(shift3 · XL) · 작곡 담당은 엔진이 쓰지 않음."""
+        po = self.post
+        model = self.ps["model"]
+        opt = dict(self.ps["opt"])
+        st = prompt.STYLE_BY.get(self.plan.style, prompt.STYLE_BY[prompt.DEFAULT_STYLE])
+        cap = (self.plan.caption or "").strip() or st[2]
+
+        def gen(req, tag):
+            req.update(opt)
+            d = wd / f"fix_{tag}"
+            d.mkdir(parents=True, exist_ok=True)
+            got = self.eng.generate(req, d, lambda f, t: say(0.2 + 0.4 * f, tag), self.stopped)
+            return PO.to_wav(got[0], wd / f"fix_{tag}.wav")
+        if po.repaint:
+            d = ff.duration(cur)
+            a, b = max(0.0, float(po.rp_a)), min(d, float(po.rp_b))
+            if b - a < 1.0:
+                raise EG.EngineError(f"부분 다시 만들기 구간이 이상합니다({po.rp_a}~{po.rp_b}초, 곡 길이 {int(d)}초).")
+            say(0.2, f"{int(a)}~{int(b)}초 다시 만드는 중")
+            cur = gen(prompt.repaint_request(cur, a, b, cap, model), "repaint")
+        if po.redo:
+            say(0.35, "다시 입히는 중")
+            req = prompt.cover_request(cur, prompt.with_real(cap), 1.0, 0.0, model)
+            ref = self._ref(wd, None)
+            if ref is not None:
+                req["reference_audio_path"] = str(ref)
+            cur = gen(req, "redo")
+        if po.extend:
+            d = ff.duration(cur)
+            say(0.5, f"{po.ext_s}초 이어 만드는 중")
+            cur = gen(prompt.repaint_request(cur, max(0.0, d - 2.0), d + float(po.ext_s), cap, model), "extend")
+        return cur
 
     def _run_redo(self, out_dir: Path):
         """다시 입히기 시험(v0.1.18): 만든 곡(self.redo)을 원본으로 커버 4가지 — 구성은 따라가고 소리를 새로 그림.
