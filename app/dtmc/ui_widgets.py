@@ -307,6 +307,7 @@ class StageRow(QFrame):
         self.key, self.body, self.fixed = key, body, fixed
         self.on, self.open_ = True, False
         self.locked = False
+        self.title = ""                       # 머리 줄 이름 바꾸기(예: 생성 → 후보정)
         self.summary = ""
         self.setObjectName("StageRow")
         self.setStyleSheet("#StageRow{background:#2a2a2a; border:1px solid #3a3a3a; border-radius:3px;}")
@@ -376,7 +377,7 @@ class StageRow(QFrame):
         f.setBold(True)
         p.setFont(f)
         p.setPen(QColor(col if act else "#6f6f6f"))
-        p.drawText(QRectF(40, 0, 44, r.height()), Qt.AlignVCenter | Qt.AlignLeft, name_of(self.key))
+        p.drawText(QRectF(40, 0, 44, r.height()), Qt.AlignVCenter | Qt.AlignLeft, self.title or name_of(self.key))
         f.setBold(False)
         p.setFont(f)
         p.setPen(QColor(SUB if act else "#6f6f6f"))

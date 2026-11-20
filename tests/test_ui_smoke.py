@@ -90,6 +90,13 @@ w.strength.setValue(12)
 assert w.plan().strength == 60 and w.strength_lab.text() == "60%"
 shot(w, "04b_strength.png")
 w.strength.setValue(0)
+# 후보정 시안 화면
+w.work.set_value("post"); w._work_changed()
+w.post["vocals"].set_value("mute"); w.post["denoise"].set_value("low"); w.post["clean"].set_value(["loud", "low"]); w._post_sum()
+for k in ("edit", "sound", "inst", "fix"):
+    w.post_tab.set_value(k); w.post_pages.setCurrentIndex(["edit", "sound", "inst", "fix"].index(k))
+    shot(w, f"post_{k}.png")
+w.work.set_value("new"); w._work_changed()
 # 스타일 고르기 = 하나만 · 지시문 자동 채움
 w.style.btns["jazz"].click()
 assert w.style_key() == "jazz" and w.cap.toPlainText().startswith("Jazz trio") and w.plan().caption == ""
