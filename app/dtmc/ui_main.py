@@ -666,12 +666,12 @@ class WorkWindow(DragMove, QWidget):
         P["denoise"] = slider(0, 10, 0, lambda v: "끔" if v == 0 else f"-{v * 2}dB", tick=1)
         P["denoise"].setToolTip("잡음(쉬익 소리) 줄이는 양. 세게 하면 소리가 뭉개지거나 '찰랑'거릴 수 있음")
         dbf = lambda v: "그대로" if v == 0 else f"{v / 2:+g}dB"  # noqa: E731
-        P["low"] = slider(-12, 12, 0, dbf, [(0, ""), (-4, "정리")])
-        P["low"].setToolTip("저음 = 120Hz 아래를 키우거나 줄임(0.5dB 단위). ▼ 표시 근처로 끌면 붙음: 가운데 = 그대로 · "
-                            "정리(-2dB) = 웅웅거림을 덜어 냄")
-        P["high"] = slider(-12, 12, 0, dbf, [(0, ""), (-6, "정리")])
-        P["high"].setToolTip("고음 = 8kHz 위(지글거림 · 금속성)를 키우거나 줄임. 정리(-3dB) = 예전 '고음 정리'"
-                             "(3.5kHz 찌르는 소리도 조금 함께 누름)")
+        P["low"] = slider(-12, 12, 0, dbf, [(0, False), (-4, True)])
+        P["low"].setToolTip("저음 = 120Hz 아래를 키우거나 줄임(0.5dB 단위). 작은 ▼ = 정리(-2dB, 웅웅거림을 덜어 냄) — "
+                            "근처로 끌면 붙음 · 가운데(그대로)도 붙음")
+        P["high"] = slider(-12, 12, 0, dbf, [(0, False), (-6, True)])
+        P["high"].setToolTip("고음 = 8kHz 위(지글거림 · 금속성)를 키우거나 줄임. 작은 ▼ = 정리(-3dB, 3.5kHz 찌르는 소리도 "
+                             "조금 함께 누름) — 근처로 끌면 붙음 · 가운데(그대로)도 붙음")
         P["clean"] = tog([("click", "튀는 소리"), ("loud", "크기 맞추기")], one=False)
         P["clean"].setToolTip("크기 맞추기 = 30Hz 아래 웅웅거림 자르기 + 압축 + 유튜브 기준(-14 LUFS) + 깨짐 막기")
         sound = self._rows([
@@ -681,8 +681,8 @@ class WorkWindow(DragMove, QWidget):
             labeled("정리", grid4([(P["clean"], 2), (None, 2)]))])
         STEPS = ["뺌", "-12dB", "-9dB", "-6dB", "-3dB", "그대로", "+3dB", "+6dB"]
         for k_ in ("vocals", "drums", "bass", "other"):
-            P[k_] = slider(0, 7, 5, lambda v: STEPS[v], [(5, "")])
-            P[k_].setToolTip("맨 왼쪽 = 뺌 · 가운데(▼) = 그대로 · 오른쪽 = 강조(+6dB 까지, 깨짐 막기 자동)")
+            P[k_] = slider(0, 7, 5, lambda v: STEPS[v])
+            P[k_].setToolTip("맨 왼쪽 = 뺌 · 가운데 = 그대로 · 오른쪽 = 강조(+6dB 까지, 깨짐 막기 자동)")
         P["stems"] = tog([("on", "악기별 파일도")])
         P["stems"].setToolTip("보컬 · 드럼 · 베이스 · 나머지 4개 파일로도 저장")
         inst = self._rows([

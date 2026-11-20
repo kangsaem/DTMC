@@ -487,7 +487,8 @@ class Busy(QLabel):
 
 
 class MagnetSlider(QWidget):
-    """가로 슬라이더 + 값 글자. marks = [(값, 이름)] — 눈금 위에 주황 표시를 그리고, 그 근처(snap 칸)로 끌면 자석처럼 붙음.
+    """가로 슬라이더 + 값 글자. marks = [(값, 보임?)] — 보이는 것은 슬라이더 위에 작은 주황 ▼, 모두 근처(snap 칸)로 끌면
+    자석처럼 붙음(보이지 않는 자석 = 예: 가운데 '그대로').
     fmt(값) = 오른쪽 글자. 값은 정수 칸(예: 0.5dB 단위면 실제값 = 칸 × 0.5)."""
     changed = Signal(int)
 
@@ -508,15 +509,15 @@ class MagnetSlider(QWidget):
         self.lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.s.valueChanged.connect(self._moved)
         g = QGridLayout(self)
-        named = any(n for _m, n in self.marks)
-        g.setContentsMargins(0, 8 if self.marks else 0, 0, 0)        # 위 = 자석 표시(▼ · 이름) 자리
+        shown = any(v for _m, v in self.marks)
+        g.setContentsMargins(0, 5 if shown else 0, 0, 0)             # 위 = 자석 표시(작은 ▼) 자리
         g.setHorizontalSpacing(GAP)
         for c in range(4):
             g.setColumnStretch(c, 1)
         g.addWidget(self.s, 0, 0, 1, 3)
         g.addWidget(self.lab, 0, 3)
         self.s.setFixedHeight(BTN_H - 6 if not tick else BTN_H)
-        self.setFixedHeight(self.s.height() + (8 if self.marks else 0) + (2 if named else 0))
+        self.setFixedHeight(self.s.height() + (5 if shown else 0))
 
     def _moved(self, v):
         for m, _n in self.marks:                            # 자석: 표시 근처면 그 값으로
@@ -538,23 +539,20 @@ class MagnetSlider(QWidget):
 
     def paintEvent(self, e):
         super().paintEvent(e)
-        if not self.marks:
+        if not any(v for _m, v in self.marks):
             return
         p = QPainter(self)
         sg = self.s.geometry()
         lo, hi = self.s.minimum(), self.s.maximum()
-        f = p.font()
-        f.setPointSizeF(max(6.5, f.pointSizeF() - 2.5))
-        p.setFont(f)
-        for m, name in self.marks:
+        for m, shown in self.marks:
+            if not shown:
+                continue
             x = sg.x() + 8 + (sg.width() - 16) * (m - lo) / max(1, hi - lo)
             on = self.s.value() == m
             col = QColor("#f08a3c" if on else "#b86a2c")
             p.setPen(col)
             p.setBrush(col)
-            p.drawPolygon([QPointF(x - 4, 0), QPointF(x + 4, 0), QPointF(x, 6)])
-            if name:
-                p.drawText(QRectF(x + 6, -2, 60, 12), Qt.AlignLeft | Qt.AlignTop, name)
+            p.drawPolygon([QPointF(x - 3, 0), QPointF(x + 3, 0), QPointF(x, 4)])
         p.end()
 
 
