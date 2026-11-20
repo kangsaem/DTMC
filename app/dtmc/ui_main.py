@@ -593,7 +593,7 @@ class WorkWindow(DragMove, QWidget):
         for wdg in (self.row_title, self.row_cand):
             wdg.setVisible(not post)
         self.wave.setVisible(post)                                # [시안] 후보정 = 창 폭 전체 파형 띠
-        self.list.setFixedHeight(64 if post else LIST_H)          # 후보정은 파일 1~2개 → 목록 낮게
+        self.list.setFixedHeight(56 if post else LIST_H)          # 후보정은 파일 1~2개 → 목록 낮게
         for wdg in (self.mode_lab, self.eng_lab):
             wdg.setVisible(not post)
         self.warn_lab.setVisible(bool(hw.profile().warn) and not post)

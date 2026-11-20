@@ -559,12 +559,21 @@ class MagnetSlider(QWidget):
 class WaveView(QWidget):
     """[시안] 창 폭 전체 파형 · 위 띠(고른 구간 글자) · 아래 띠(시간 · 마디 번호) · 마디 줄 · 끌면 마디에 붙음."""
     region = Signal(float, float)
-    TOP, BOT = 16, 14
+    seek = Signal(float)
+    TOP, BOT = 26, 14
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.peaks, self.dur, self.sel, self._a = None, 0.0, None, None
         self.title, self.bpm, self.beat0, self.show_sel = "", 0.0, 0.0, True
+        self.pos, self.playing, self._x0 = 0.0, False, 0
+        self.b_play = small_button("▶", 34, 22, "듣기 / 멈춤 — 파형을 한 번 누르면 그 지점부터")
+        self.b_play.setParent(self)
+        self.b_play.move(0, 1)
+        self.b_loop = small_button("구간 듣기", 72, 22, "고른 구간만 되풀이해 듣기")
+        self.b_loop.setParent(self)
+        self.b_loop.setCheckable(True)
+        self.b_loop.move(38, 1)
         self.setMinimumHeight(60)
         self.setCursor(Qt.IBeamCursor)
 
@@ -595,15 +604,24 @@ class WaveView(QWidget):
     def mousePressEvent(self, e):
         if self.dur > 0:
             self._a = self._t(e.position().x())
+            self._x0 = e.position().x()
+
+    def set_pos(self, t: float):
+        self.pos = t
+        self.update()
 
     def mouseMoveEvent(self, e):
-        if self._a is not None:
+        if self._a is not None and abs(e.position().x() - self._x0) > 3:
             b = self._t(e.position().x())
             self.set_sel(self.snap(min(self._a, b)), self.snap(max(self._a, b)))
 
     def mouseReleaseEvent(self, e):
-        if self._a is not None and self.sel:
-            self.region.emit(self.sel[0], self.sel[1])
+        if self._a is not None:
+            if abs(e.position().x() - self._x0) <= 3:          # 한 번 누름 = 듣는 위치 옮김
+                self.set_pos(self._a)
+                self.seek.emit(self._a)
+            elif self.sel:                                      # 끌기 = 마디 고르기
+                self.region.emit(self.sel[0], self.sel[1])
         self._a = None
 
     def paintEvent(self, e):
@@ -643,6 +661,12 @@ class WaveView(QWidget):
             p.setPen(QColor("#f08a3c"))
             for t in sel:
                 p.drawLine(QPointF(X(t), T + 1), QPointF(X(t), H - B - 1))
+        xp = X(self.pos)                                                         # 듣는 위치 = 흰 줄 + 위 삼각형
+        p.setPen(QPen(QColor("#ffffff"), 1.5))
+        p.drawLine(QPointF(xp, T + 1), QPointF(xp, H - B - 1))
+        p.setBrush(QColor("#ffffff"))
+        p.setPen(Qt.NoPen)
+        p.drawPolygon([QPointF(xp - 4, T + 1), QPointF(xp + 4, T + 1), QPointF(xp, T + 6)])
         # 아래 띠: 마디 번호(4마디마다) · 시간(분:초)
         p.setPen(QColor(SUB_TXT))
         if bs > 0:
@@ -652,7 +676,11 @@ class WaveView(QWidget):
                     p.drawText(QRectF(X(t) + 2, H - B, 60, B), Qt.AlignLeft | Qt.AlignVCenter, f"{k + 1}마디 {int(t // 60)}:{int(t % 60):02d}")
                 k, t = k + 1, t + bs
         # 위 띠: 파일 이름 · 빠르기 / 고른 구간
-        p.drawText(QRectF(4, 0, W / 2, T), Qt.AlignLeft | Qt.AlignVCenter,
+        p.setPen(QColor("#ffffff"))
+        p.drawText(QRectF(118, 0, 110, T), Qt.AlignLeft | Qt.AlignVCenter,
+                   f"{int(self.pos // 60)}:{self.pos % 60:05.2f} · {self.bar_no(self.pos)}마디")
+        p.setPen(QColor(SUB_TXT))
+        p.drawText(QRectF(232, 0, W / 2, T), Qt.AlignLeft | Qt.AlignVCenter,
                    f"{self.title}  ·  {int(self.dur // 60)}:{int(self.dur % 60):02d}" + (f"  ·  {self.bpm:.0f} BPM · 한 마디 {bs:.2f}초" if bs else ""))
         if sel:
             p.setPen(QColor("#f08a3c"))
