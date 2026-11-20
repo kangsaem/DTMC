@@ -338,8 +338,9 @@ class WorkWindow(DragMove, QWidget):
         }
         self.stages["analyze"].toggled.connect(lambda _k, _v: self._sync())
         info = QVBoxLayout()
-        info.setSpacing(6)
+        info.setSpacing(4)
         info.setContentsMargins(0, 0, 0, 0)
+        info.addWidget(grid4([(self.work, 4)]))            # 맨 위 = 작업 고르기(새로 만들기 | 후보정, 시안 H)
         info.addWidget(self.mode_lab)
         info.addWidget(self.eng_lab)
         info.addWidget(self.warn_lab)
@@ -570,7 +571,6 @@ class WorkWindow(DragMove, QWidget):
         v = QVBoxLayout(w)
         v.setContentsMargins(10, 4, 12, 12)
         v.setSpacing(9)
-        v.addLayout(labeled("작업", grid4([(self.work, 2), (None, 2)])))
         v.addWidget(self.work_stack)
         return w
 
