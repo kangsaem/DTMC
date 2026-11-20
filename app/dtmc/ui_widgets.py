@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 
-from PySide6.QtCore import QEvent, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractSpinBox, QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
@@ -484,3 +484,149 @@ class Busy(QLabel):
     def _tick(self):
         self._n = (self._n + 1) % 4
         self.setText(self._base + "." * self._n)
+
+
+class MagnetSlider(QWidget):
+    """가로 슬라이더 + 값 글자. marks = [(값, 이름)] — 눈금 위에 주황 표시를 그리고, 그 근처(snap 칸)로 끌면 자석처럼 붙음.
+    fmt(값) = 오른쪽 글자. 값은 정수 칸(예: 0.5dB 단위면 실제값 = 칸 × 0.5)."""
+    changed = Signal(int)
+
+    def __init__(self, lo: int, hi: int, val: int, fmt, marks=(), snap: int = 1, tick: int = 0, parent=None):
+        from PySide6.QtWidgets import QSlider
+        super().__init__(parent)
+        self.marks, self.snap, self.fmt = list(marks), snap, fmt
+        self.s = QSlider(Qt.Horizontal)
+        self.s.setRange(lo, hi)
+        self.s.setValue(val)
+        self.s.setPageStep(1)
+        if tick:
+            self.s.setTickPosition(QSlider.TicksBelow)
+            self.s.setTickInterval(tick)
+        self.lab = QLabel(fmt(val))
+        self.lab.setStyleSheet(f"color:{SUB};")
+        self.lab.setMinimumWidth(1)
+        self.lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.s.valueChanged.connect(self._moved)
+        g = QGridLayout(self)
+        named = any(n for _m, n in self.marks)
+        g.setContentsMargins(0, 8 if self.marks else 0, 0, 0)        # 위 = 자석 표시(▼ · 이름) 자리
+        g.setHorizontalSpacing(GAP)
+        for c in range(4):
+            g.setColumnStretch(c, 1)
+        g.addWidget(self.s, 0, 0, 1, 3)
+        g.addWidget(self.lab, 0, 3)
+        self.s.setFixedHeight(BTN_H - 6 if not tick else BTN_H)
+        self.setFixedHeight(self.s.height() + (8 if self.marks else 0) + (2 if named else 0))
+
+    def _moved(self, v):
+        for m, _n in self.marks:                            # 자석: 표시 근처면 그 값으로
+            if v != m and abs(v - m) <= self.snap and self.s.isSliderDown():
+                self.s.blockSignals(True)
+                self.s.setValue(m)
+                self.s.blockSignals(False)
+                v = m
+                break
+        self.lab.setText(self.fmt(v))
+        self.changed.emit(v)
+        self.update()
+
+    def value(self) -> int:
+        return self.s.value()
+
+    def setValue(self, v: int):
+        self.s.setValue(int(v))
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if not self.marks:
+            return
+        p = QPainter(self)
+        sg = self.s.geometry()
+        lo, hi = self.s.minimum(), self.s.maximum()
+        f = p.font()
+        f.setPointSizeF(max(6.5, f.pointSizeF() - 2.5))
+        p.setFont(f)
+        for m, name in self.marks:
+            x = sg.x() + 8 + (sg.width() - 16) * (m - lo) / max(1, hi - lo)
+            on = self.s.value() == m
+            col = QColor("#f08a3c" if on else "#b86a2c")
+            p.setPen(col)
+            p.setBrush(col)
+            p.drawPolygon([QPointF(x - 4, 0), QPointF(x + 4, 0), QPointF(x, 6)])
+            if name:
+                p.drawText(QRectF(x + 6, -2, 60, 12), Qt.AlignLeft | Qt.AlignTop, name)
+        p.end()
+
+
+class WaveView(QWidget):
+    """파형(고른 파일) + 끌어서 구간 고르기(region 신호: 시작 초, 끝 초). 고른 구간 = 주황 음영."""
+    region = Signal(float, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.peaks, self.dur, self.sel, self._a = None, 0.0, None, None
+        self.title = ""
+        self.setMinimumHeight(60)
+        self.setCursor(Qt.IBeamCursor)
+
+    def set_audio(self, peaks, dur: float, title: str = ""):
+        self.peaks, self.dur, self.title = peaks, float(dur), title
+        self.update()
+
+    def set_sel(self, a: float, b: float):
+        self.sel = (a, b) if b > a else None
+        self.update()
+
+    def _t(self, x) -> float:
+        return max(0.0, min(self.dur, self.dur * (x - 4) / max(1, self.width() - 8)))
+
+    def mousePressEvent(self, e):
+        if self.dur > 0:
+            self._a = self._t(e.position().x())
+
+    def mouseMoveEvent(self, e):
+        if self._a is not None:
+            b = self._t(e.position().x())
+            self.set_sel(min(self._a, b), max(self._a, b))
+
+    def mouseReleaseEvent(self, e):
+        if self._a is not None and self.sel:
+            self.region.emit(round(self.sel[0]), round(self.sel[1]))
+        self._a = None
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        r = self.rect().adjusted(0, 0, -1, -1)
+        p.fillRect(r, QColor("#1e1e1e"))
+        p.setPen(QColor("#3a3a3a"))
+        p.drawRect(r)
+        if self.peaks is None or self.dur <= 0:
+            p.setPen(QColor(SUB_TXT))
+            p.drawText(r, Qt.AlignCenter, "파일을 고르면 파형이 보입니다 · 끌어서 '부분 다시' 구간 고르기")
+            return
+        w, h = self.width() - 8, self.height()
+        if self.sel:
+            xa = 4 + w * self.sel[0] / self.dur
+            xb = 4 + w * self.sel[1] / self.dur
+            p.fillRect(QRectF(xa, 1, xb - xa, h - 2), QColor(200, 102, 30, 90))
+        p.setPen(QColor("#5fb0e8"))
+        n = len(self.peaks)
+        mid = h / 2
+        for i in range(w):
+            v = float(self.peaks[min(n - 1, int(i * n / max(1, w)))])
+            p.drawLine(QPointF(4 + i, mid - v * (mid - 6)), QPointF(4 + i, mid + v * (mid - 6)))
+        p.setPen(QColor(SUB_TXT))
+        f = p.font()
+        f.setPointSizeF(max(6.5, f.pointSizeF() - 2))
+        p.setFont(f)
+        step = 10 if self.dur <= 90 else 30 if self.dur <= 300 else 60
+        t = step
+        while t < self.dur:
+            x = 4 + w * t / self.dur
+            p.drawLine(QPointF(x, h - 5), QPointF(x, h - 1))
+            p.drawText(QRectF(x - 20, h - 17, 40, 12), Qt.AlignHCenter, f"{int(t // 60)}:{int(t % 60):02d}")
+            t += step
+        if self.sel:
+            p.setPen(QColor("#f08a3c"))
+            p.drawText(QRectF(6, 2, w, 14), Qt.AlignLeft,
+                       f"고른 구간 {int(self.sel[0])}~{int(self.sel[1])}초 → 부분 다시")

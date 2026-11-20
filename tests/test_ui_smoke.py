@@ -92,12 +92,14 @@ shot(w, "04b_strength.png")
 w.strength.setValue(0)
 # 후보정 시안 화면
 w.work.set_value("post"); w._work_changed()
-w.post["vocals"].set_value(["mute"]); w.post["denoise"].set_value(["mid"]); w.post["clean"].set_value(["click"])
+w.post["vocals"].setValue(0); w.post["drums"].setValue(6); w.post["denoise"].setValue(4); w.post["high"].setValue(-6)
+w.post["clean"].set_value(["loud"]); w._wave_region(12, 20)
 w.stages["edit"].set_on(False); w._post_sum(); w._sync()
 po = w.post_plan()
-assert po.vocals == "mute" and po.denoise == "mid" and po.clean == ["click"] and not po.edit_on() and not po.fix_on()
-assert w.stages["edit"].summary == "꺼짐" and w.stages["inst"].summary == "보컬 뺌" and not w.eng_row2.isEnabled()
-assert "파일 2개 → 결과 2개 · 악기 → 음향" in w.sum.text(), w.sum.text()
+assert po.vocals == -100 and po.drums == 3 and po.denoise == 8 and po.high == -3 and po.clean == ["loud"], po
+assert po.repaint and (po.rp_a, po.rp_b) == (12, 20) and not po.edit_on() and po.fit == "keep"
+assert w.stages["edit"].summary == "꺼짐" and "보컬 뺌" in w.stages["inst"].summary and w.eng_row2.isEnabled()
+assert w.wave.isVisible() and w.wave.peaks is not None and not w.mode_lab.isVisible()
 QApplication.processEvents(); QApplication.processEvents(); shot(w, "post_all.png")
 w.stages["edit"].set_on(True)
 w.work.set_value("new"); w._work_changed()

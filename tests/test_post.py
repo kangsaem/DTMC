@@ -42,10 +42,9 @@ def run_job(job):
 
 # 1. 필터 하나하나(ffmpeg 이 받아들이는지)
 w = PO.to_wav(src, tmp / "a.wav")
-full = PO.Post(denoise="mid", clean=["low", "high", "click", "loud"], space="water")
 assert PO.sound_chain(PO.Post()) == ""
-for sp in ("room", "water", "wide"):
-    PO._af(w, tmp / f"s_{sp}.wav", PO.sound_chain(PO.Post(denoise="low", clean=["low", "high", "click", "loud"], space=sp)), sp)
+for kw in (dict(denoise=8, low=-2, high=-3, clean=["click", "loud"]), dict(low=3, high=2), dict(denoise=20, high=-6)):
+    PO._af(w, tmp / f"s_{len(kw)}_{kw.get('denoise', 0)}.wav", PO.sound_chain(PO.Post(**kw)), str(kw))
 PO.trim_silence(w, tmp / "t.wav")
 d0 = ff.duration(w)
 w19 = PO._af(w, tmp / "w19.wav", "atrim=0:19", "자르기")
@@ -63,7 +62,8 @@ fake.write_text("import sys, shutil\nfor n in ('vocals','drums','bass','other'):
 engine.python_prefix = lambda mod: [sys.executable, str(fake)]
 (engine.project()).mkdir(parents=True, exist_ok=True)
 (engine.project() / ".dtmc_demucs_ok").write_text("ok", encoding="utf-8")
-po = PO.Post(vocals="mute", drums="down", stems=True, cut=["trim"], fade_out=2, denoise="low", clean=["loud"])
+po = PO.Post(vocals=PO.MUTE, stems=True, cut=["trim"], fade_out=2, denoise=6, clean=["loud"])
+assert PO.Post(vocals=PO.MUTE, drums=3).tag() == "악기" and PO.Post(drums=3).summary() == "드럼 +3dB"
 assert po.tag() == "보컬뺌_편집_다듬기" and po.inst_on() and po.edit_on() and po.sound_on() and not po.fix_on()
 src_s = jobs.Source(str(src))
 job = jobs.MakeJob(engine.Engine(), [src_s], jobs.Plan(out_dir=str(tmp / "out1"), fmt="mp3"), post=po)

@@ -730,7 +730,7 @@ class MakeJob(QThread):
             PO.ensure_demucs(line, self.stopped)
             say(0.1, "악기 나누는 중")
             stem_files = PO.separate(cur, wd / "stems", line, self.stopped)
-            if any(getattr(po, x) != "keep" for x in PO.STEMS):
+            if any(getattr(po, x) != 0 for x in PO.STEMS):
                 cur = PO.remix(stem_files, po, nxt("remix"))
         # 2. 고치기(엔진)
         if po.fix_on():

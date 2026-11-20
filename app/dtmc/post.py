@@ -20,7 +20,7 @@ L = logging.getLogger("dtmc")
 
 STEMS = ("vocals", "drums", "bass", "other")
 STEM_KO = {"vocals": "보컬", "drums": "드럼", "bass": "베이스", "other": "나머지"}
-GAIN = {"keep": 1.0, "down": 0.5, "mute": 0.0}        # 줄임 = -6dB
+MUTE = -100.0                                        # 악기 dB 가 이 값이면 뺌
 
 
 @dataclass
@@ -33,13 +33,14 @@ class Post:
     fit_s: int = 90
     tempo: int = 0                                   # % (-10~10)
     key: int = 0                                     # 반음(-2~2)
-    denoise: str = "off"                             # off · low · mid
-    clean: list = field(default_factory=list)        # low · high · click · loud
-    space: str = "off"                               # off · room · water · wide
-    vocals: str = "keep"
-    drums: str = "keep"
-    bass: str = "keep"
-    other: str = "keep"
+    denoise: int = 0                                 # 잡음 줄이는 양(dB) · 0 = 끔
+    low: float = 0.0                                 # 저음(120Hz 아래) ±dB
+    high: float = 0.0                                # 고음(8kHz 위) ±dB
+    clean: list = field(default_factory=list)        # click · loud
+    vocals: float = 0.0                              # 악기 ±dB · MUTE = 뺌 · 0 = 그대로
+    drums: float = 0.0
+    bass: float = 0.0
+    other: float = 0.0
     stems: bool = False
     repaint: bool = False
     rp_a: int = 30
@@ -49,7 +50,7 @@ class Post:
     ext_s: int = 20
 
     def inst_on(self) -> bool:
-        return self.stems or any(getattr(self, k) != "keep" for k in STEMS)
+        return self.stems or any(getattr(self, k) != 0 for k in STEMS)
 
     def fix_on(self) -> bool:
         return self.repaint or self.redo or self.extend
@@ -59,7 +60,7 @@ class Post:
             or bool(self.key)
 
     def sound_on(self) -> bool:
-        return self.denoise != "off" or bool(self.clean) or self.space != "off"
+        return self.denoise > 0 or bool(self.low) or bool(self.high) or bool(self.clean)
 
     def any_on(self) -> bool:
         return self.inst_on() or self.fix_on() or self.edit_on() or self.sound_on()
@@ -67,10 +68,10 @@ class Post:
     def tag(self) -> str:
         """파일 이름 끝(짧게): 예 '_보컬뺌_다듬기'. 자세한 것은 작업 기록."""
         t = []
-        muted = [STEM_KO[k] for k in STEMS if getattr(self, k) == "mute"]
-        if len(muted) == 1:
+        muted = [STEM_KO[k] for k in STEMS if getattr(self, k) <= MUTE]
+        if len(muted) == 1 and all(getattr(self, k) in (0, MUTE) for k in STEMS):
             t.append(muted[0] + "뺌")
-        elif muted or any(getattr(self, k) == "down" for k in STEMS):
+        elif any(getattr(self, k) != 0 for k in STEMS):
             t.append("악기")
         if self.repaint:
             t.append("부분다시")
@@ -88,8 +89,8 @@ class Post:
         t = []
         for k in STEMS:
             v = getattr(self, k)
-            if v != "keep":
-                t.append(STEM_KO[k] + (" 뺌" if v == "mute" else " 줄임"))
+            if v:
+                t.append(STEM_KO[k] + (" 뺌" if v <= MUTE else f" {v:+g}dB"))
         if self.stems:
             t.append("악기별 저장")
         if self.repaint:
@@ -107,11 +108,13 @@ class Post:
             t.append(f"템포 {self.tempo:+d}%")
         if self.key:
             t.append(f"조 {self.key:+d}")
-        if self.denoise != "off":
-            t.append("잡음 " + {"low": "약", "mid": "중"}[self.denoise])
-        t += [{"low": "저음 정리", "high": "고음 정리", "click": "튀는 소리", "loud": "크기 맞추기"}[k] for k in self.clean]
-        if self.space != "off":
-            t.append({"room": "울림", "water": "물속", "wide": "넓게"}[self.space])
+        if self.denoise:
+            t.append(f"잡음 -{self.denoise}dB")
+        if self.low:
+            t.append(f"저음 {self.low:+g}dB")
+        if self.high:
+            t.append(f"고음 {self.high:+g}dB")
+        t += [{"click": "튀는 소리", "loud": "크기 맞추기"}[k] for k in self.clean]
         return " · ".join(t)
 
 
@@ -137,21 +140,19 @@ def sound_chain(p: Post) -> str:
     f = []
     if "click" in p.clean:
         f += ["adeclick", "adeclip"]
-    if p.denoise != "off":                                   # FFT 잡음 줄이기(히스) — 약 6dB · 중 12dB
-        f.append(f"afftdn=nr={6 if p.denoise == 'low' else 12}:nf=-50:tn=1")
-    if "low" in p.clean:                                     # 30Hz 아래 웅웅거림
-        f.append("highpass=f=30:poles=2")
-    if "high" in p.clean:                                    # 귀를 찌르는 고음 · 금속성 살짝 누름
-        f += ["equalizer=f=3500:t=q:w=1.2:g=-2", "highshelf=f=9000:g=-3"]
-    if p.space == "room":
-        f.append("aecho=0.8:0.6:45|70|110:0.22|0.15|0.08")
-    elif p.space == "water":                                 # 고음을 깎고 울림을 더함(물속 느낌)
-        f += ["lowpass=f=2200:poles=2", "aecho=0.8:0.7:60|95|140:0.3|0.22|0.12", "chorus=0.6:0.8:45:0.35:0.25:2"]
-    elif p.space == "wide":
-        f.append("extrastereo=m=1.6")
-    if "loud" in p.clean:                                    # 압축 → 유튜브 기준 크기(-14 LUFS) → 깨짐 막기
-        f += ["acompressor=threshold=-18dB:ratio=2:attack=20:release=250:makeup=2",
+    if p.denoise > 0:                                        # FFT 잡음 줄이기(히스) — 줄이는 양 dB
+        f.append(f"afftdn=nr={max(1, min(40, int(p.denoise)))}:nf=-50:tn=1")
+    if p.low:                                                # 저음(120Hz 아래) ±dB
+        f.append(f"lowshelf=f=120:g={p.low:g}")
+    if p.high:                                               # 고음(8kHz 위) ±dB · 줄일 때는 3.5kHz 찌르는 소리도 조금
+        f.append(f"highshelf=f=8000:g={p.high:g}")
+        if p.high < 0:
+            f.append(f"equalizer=f=3500:t=q:w=1.2:g={max(-3.0, p.high * 0.6):.2f}")
+    if "loud" in p.clean:                                    # 30Hz 아래 자르기 → 압축 → 유튜브 기준(-14 LUFS) → 깨짐 막기
+        f += ["highpass=f=30:poles=2", "acompressor=threshold=-18dB:ratio=2:attack=20:release=250:makeup=2",
               "loudnorm=I=-14:TP=-1.5:LRA=11", "alimiter=limit=0.89"]
+    elif p.low > 0 or p.high > 0:                            # 키우기만 했으면 깨짐 막기만
+        f.append("alimiter=limit=0.95")
     return ",".join(f)
 
 
@@ -273,16 +274,16 @@ def separate(src_wav, out_dir, on_line, should_stop) -> dict:
 
 
 def remix(stems: dict, p: Post, dst) -> Path:
-    """나눈 4개를 설정대로 다시 섞음(그대로 1 · 줄임 0.5 · 뺌 0)."""
-    keep = [(k, GAIN[getattr(p, k)]) for k in STEMS if GAIN[getattr(p, k)] > 0]
+    """나눈 4개를 설정대로 다시 섞음(±dB · 뺌 = 빼고). 키운 악기가 있으면 마지막에 깨짐 막기."""
+    keep = [(k, 10 ** (getattr(p, k) / 20.0)) for k in STEMS if getattr(p, k) > MUTE]
     if not keep:
         raise EG.EngineError("악기를 모두 빼면 남는 소리가 없습니다.")
     args, parts = [], []
     for i, (k, g) in enumerate(keep):
         args += ["-i", str(stems[k])]
-        parts.append(f"[{i}:a]volume={g}[s{i}]")
+        parts.append(f"[{i}:a]volume={g:.4f}[s{i}]")
     chain = ";".join(parts) + ";" + "".join(f"[s{i}]" for i in range(len(keep))) + \
-        f"amix=inputs={len(keep)}:normalize=0[o]"
+        f"amix=inputs={len(keep)}:normalize=0" + (",alimiter=limit=0.95" if any(g > 1 for _k, g in keep) else "") + "[o]"
     _ff([*args, "-filter_complex", chain, "-map", "[o]", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", str(dst)],
         "악기 다시 섞기")
     return Path(dst)

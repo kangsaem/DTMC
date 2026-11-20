@@ -7,6 +7,8 @@ import os
 import time
 from pathlib import Path
 
+import numpy as np
+
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (QSlider, QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPlainTextEdit,
@@ -15,7 +17,8 @@ from PySide6.QtWidgets import (QSlider, QAbstractItemView, QFileDialog, QHBoxLay
 
 from . import post as PO
 from . import __version__, engine as EG, ff, hw, jobs, log, paths, prompt, settings, taskbar, ui_style
-from .ui_widgets import (CHK_BG, SUB, SUB_TXT, WARN, Busy, DragMove, Grip, Multi, Seg, StageRow, StepBar,
+from .ui_widgets import (CHK_BG, SUB, SUB_TXT, WARN, Busy, DragMove, Grip, MagnetSlider, Multi, Seg, StageRow, StepBar,
+                         WaveView,
                          BTN_H, TEST_W, grid4, labeled, main_button, no_hfw, open_folder, small_button)
 
 L = log.log
@@ -333,6 +336,9 @@ class WorkWindow(DragMove, QWidget):
         self.warn_lab.setVisible(bool(pr.warn))
         self.sum = no_hfw(QLabel(""), 2)
         self.sum.setStyleSheet(f"color:{SUB};")
+        self.wave = WaveView()                                     # 후보정: 고른 파일 파형 · 끌어서 '부분 다시' 구간
+        self.wave.region.connect(self._wave_region)
+        self.wave.setVisible(False)
         self.stages = {
             "analyze": StageRow("analyze", self._analyze_body()),
             "generate": StageRow("generate", self._generate_body(), fixed=True),
@@ -346,6 +352,7 @@ class WorkWindow(DragMove, QWidget):
         info.setSpacing(4)
         info.setContentsMargins(0, 0, 0, 0)
         info.addWidget(grid4([(self.work, 2), (None, 2)]))  # 맨 위 = 작업 고르기(새로 만들기 | 후보정, 시안 I · 주황)
+        info.addWidget(self.wave, 1)
         info.addWidget(self.mode_lab)
         info.addWidget(self.eng_lab)
         info.addWidget(self.warn_lab)
@@ -584,6 +591,13 @@ class WorkWindow(DragMove, QWidget):
             self.stages[k].setVisible(post)
         for wdg in (self.row_title, self.row_cand):
             wdg.setVisible(not post)
+        self.wave.setVisible(post)                                # 후보정 = 위 정보 칸에 파형(하드웨어 · 엔진 줄 대신)
+        for wdg in (self.mode_lab, self.eng_lab):
+            wdg.setVisible(not post)
+        self.warn_lab.setVisible(bool(hw.profile().warn) and not post)
+        if post:
+            self._wave_path = None
+            self._wave_load()
         if hasattr(self, "test_w"):
             self.test_w.setVisible(not post and self.mode == "setup")
         self._sync()
@@ -607,24 +621,31 @@ class WorkWindow(DragMove, QWidget):
         return w
 
     def _post_sections(self) -> dict:
-        """후보정(시안 J): 편집 · 음향 · 악기 · 고치기 — '끔/그대로' 버튼 없이 켜는 버튼만(다시 누르면 끔).
+        """후보정(시안 K): '끔/그대로' 없이 — 숫자 0 = 안 함 · 슬라이더 가운데 = 그대로 · 켜는 버튼은 다시 누르면 끔.
         칸 머리 체크 = 칸 전체 켬/끔(설정은 기억)."""
         def tog(opts, one=True):
-            """켜는 버튼들. one = 그중 하나만(다시 누르면 끔) · 아니면 여러 개."""
             m = Multi(opts, [], limit=1 if one else len(opts), cols=len(opts), min_one=False)
             if one:
                 m.set_swap(True)
             m.changed.connect(lambda _v: self._post_sum())
             return m
 
-        def spin(lo, hi, val, suf, step=1):
+        def spin(lo, hi, val, suf, step=1, zero="", pre=""):
             sp = QSpinBox()
+            sp.setPrefix(pre)
             sp.setRange(lo, hi)
             sp.setValue(val)
             sp.setSuffix(suf)
             sp.setSingleStep(step)
+            if zero:
+                sp.setSpecialValueText(pre + zero)        # 맨 아래 값 = '그대로'(안 함)
             sp.valueChanged.connect(lambda _v: self._post_sum())
             return sp
+
+        def slider(lo, hi, val, fmt, marks=(), tick=0):
+            sl = MagnetSlider(lo, hi, val, fmt, marks, tick=tick)
+            sl.changed.connect(lambda _v: self._post_sum())
+            return sl
 
         def lab(t):
             q = QLabel(t)
@@ -632,35 +653,43 @@ class WorkWindow(DragMove, QWidget):
             return q
         P = self.post = {}
         P["cut"] = tog([("trim", "무음 자르기"), ("bar", "마디에서 끝"), ("loop", "루프")], one=False)
-        P["fade_in"] = spin(0, 10, 0, "초")
-        P["fade_out"] = spin(0, 20, 0, "초")
-        P["fit"] = tog([("set", "길이 맞추기")])
-        P["fit_s"] = spin(10, 600, 90, "초", 5)
-        P["tempo"] = spin(-10, 10, 0, "%")
-        P["key"] = spin(-2, 2, 0, "음")
+        P["fade_in"] = spin(0, 10, 0, "초", zero="없음", pre="들어감 ")
+        P["fade_out"] = spin(0, 20, 0, "초", zero="없음", pre="나감 ")
+        P["fit_s"] = spin(5, 600, 5, "초", 5, zero="그대로", pre="길이 ")    # 맨 아래(5) = 그대로 · 10초부터 맞춤
+        P["tempo"] = spin(-10, 10, 0, "%", zero="", pre="템포 ")
+        P["key"] = spin(-2, 2, 0, "음", pre="조 ")
+        P["fit_s"].setToolTip("영상 길이에 맞춰 마디 단위로 줄이거나 늘림(원래 소리 그대로) · 맨 아래 = 그대로")
         edit = self._rows([
             labeled("정리", grid4([(P["cut"], 3), (None, 1)])),
-            labeled("페이드", grid4([(lab("들어감"), 1), (P["fade_in"], 1), (lab("나감"), 1), (P["fade_out"], 1)])),
-            labeled("길이", grid4([(P["fit"], 1), (P["fit_s"], 1), (None, 2)])),
-            labeled("빠르기·조", grid4([(lab("템포"), 1), (P["tempo"], 1), (lab("조"), 1), (P["key"], 1)]))])
-        P["denoise"] = tog([("low", "약"), ("mid", "중")])
-        P["clean"] = tog([("low", "저음 정리"), ("high", "고음 정리"), ("click", "튀는 소리"), ("loud", "크기 맞추기")],
-                         one=False)
-        P["clean"].setToolTip("크기 맞추기 = 유튜브 기준(-14 LUFS) + 큰 소리·작은 소리 차이 줄이기(압축) + 깨짐 막기")
-        P["space"] = tog([("room", "울림"), ("water", "물속"), ("wide", "넓게")])
+            labeled("페이드", grid4([(P["fade_in"], 1), (P["fade_out"], 1), (None, 2)])),
+            labeled("길이·빠르기", grid4([(P["fit_s"], 1), (P["tempo"], 1), (P["key"], 1), (None, 1)]))])
+        P["denoise"] = slider(0, 10, 0, lambda v: "끔" if v == 0 else f"-{v * 2}dB", tick=1)
+        P["denoise"].setToolTip("잡음(쉬익 소리) 줄이는 양. 세게 하면 소리가 뭉개지거나 '찰랑'거릴 수 있음")
+        dbf = lambda v: "그대로" if v == 0 else f"{v / 2:+g}dB"  # noqa: E731
+        P["low"] = slider(-12, 12, 0, dbf, [(0, ""), (-4, "정리")])
+        P["low"].setToolTip("저음 = 120Hz 아래를 키우거나 줄임(0.5dB 단위). ▼ 표시 근처로 끌면 붙음: 가운데 = 그대로 · "
+                            "정리(-2dB) = 웅웅거림을 덜어 냄")
+        P["high"] = slider(-12, 12, 0, dbf, [(0, ""), (-6, "정리")])
+        P["high"].setToolTip("고음 = 8kHz 위(지글거림 · 금속성)를 키우거나 줄임. 정리(-3dB) = 예전 '고음 정리'"
+                             "(3.5kHz 찌르는 소리도 조금 함께 누름)")
+        P["clean"] = tog([("click", "튀는 소리"), ("loud", "크기 맞추기")], one=False)
+        P["clean"].setToolTip("크기 맞추기 = 30Hz 아래 웅웅거림 자르기 + 압축 + 유튜브 기준(-14 LUFS) + 깨짐 막기")
         sound = self._rows([
-            labeled("잡음 줄이기", grid4([(P["denoise"], 2), (None, 2)])),
-            labeled("정리", grid4([(P["clean"], 4)])),
-            labeled("공간감", grid4([(P["space"], 3), (None, 1)]))])
+            labeled("잡음 줄이기", P["denoise"]),
+            labeled("저음", P["low"]),
+            labeled("고음", P["high"]),
+            labeled("정리", grid4([(P["clean"], 2), (None, 2)]))])
+        STEPS = ["뺌", "-12dB", "-9dB", "-6dB", "-3dB", "그대로", "+3dB", "+6dB"]
         for k_ in ("vocals", "drums", "bass", "other"):
-            P[k_] = tog([("down", "줄임"), ("mute", "뺌")])
+            P[k_] = slider(0, 7, 5, lambda v: STEPS[v], [(5, "")])
+            P[k_].setToolTip("맨 왼쪽 = 뺌 · 가운데(▼) = 그대로 · 오른쪽 = 강조(+6dB 까지, 깨짐 막기 자동)")
         P["stems"] = tog([("on", "악기별 파일도")])
         P["stems"].setToolTip("보컬 · 드럼 · 베이스 · 나머지 4개 파일로도 저장")
         inst = self._rows([
-            labeled("보컬", grid4([(P["vocals"], 2), (None, 2)])),
-            labeled("드럼", grid4([(P["drums"], 2), (None, 2)])),
-            labeled("베이스", grid4([(P["bass"], 2), (None, 2)])),
-            labeled("나머지", grid4([(P["other"], 2), (None, 2)])),
+            labeled("보컬", P["vocals"]),
+            labeled("드럼", P["drums"]),
+            labeled("베이스", P["bass"]),
+            labeled("나머지", P["other"]),
             labeled("저장", grid4([(P["stems"], 2), (None, 2)]))])
         P["repaint"] = tog([("on", "부분 다시")])
         P["rp_a"] = spin(0, 600, 30, "초부터")
@@ -668,15 +697,17 @@ class WorkWindow(DragMove, QWidget):
         P["redo"] = tog([("on", "다시 입히기")])
         P["extend"] = tog([("on", "이어 만들기")])
         P["ext_s"] = spin(5, 120, 20, "초", 5)
-        self.engine2 = Seg(ENGINES, self.engine.value())       # 새로 만들기의 엔진과 같은 값(_sync 에서 맞춤)
+        self.engine2 = Seg(ENGINES, self.engine.value())
         for k_ in ("4B", "XL"):
             self.engine2.btns[k_].setEnabled(self.engine.btns[k_].isEnabled())
         self.engine2.changed.connect(lambda k_: (self.engine.set_value(k_), self._sync()))
         b_ref2 = small_button("음색 참고", tip="다시 입히기에 함께 쓸 실제 연주 녹음(최대 3개)")
         b_ref2.clicked.connect(self.pick_ref)
-        P["repaint"].setToolTip("그 구간(부터~까지)만 새로 만들고 앞뒤와 자연스럽게 이음(나머지는 원래 소리)")
+        P["repaint"].setToolTip("그 구간만 새로 만들고 앞뒤와 자연스럽게 이음 — 위 파형에서 끌어서 골라도 됨")
         P["redo"].setToolTip("구성은 두고 음색만 새로(곡 전체)")
         P["extend"].setToolTip("곡 끝에 이어서 더 만듦")
+        for k_ in ("rp_a", "rp_b"):
+            P[k_].valueChanged.connect(lambda _v: self.wave.set_sel(P["rp_a"].value(), P["rp_b"].value()))
         self.eng_row2 = grid4([(self.engine2, 3), (None, 1)])
         fix = self._rows([
             labeled("", grid4([(P["repaint"], 1), (P["rp_a"], 1), (P["rp_b"], 1), (None, 1)])),
@@ -685,10 +716,40 @@ class WorkWindow(DragMove, QWidget):
             labeled("엔진", self.eng_row2)])
         return {"edit": edit, "sound": sound, "inst": inst, "fix": fix}
 
+    def _wave_region(self, a: float, b: float):
+        """파형에서 끌어 고른 구간 → 부분 다시 칸(켜기까지)."""
+        P = self.post
+        P["rp_a"].setValue(int(a))
+        P["rp_b"].setValue(int(b))
+        P["repaint"].set_value(["on"])
+        self._post_sum()
+
+    def _wave_load(self):
+        """원곡 목록에서 고른(없으면 첫) 파일의 파형."""
+        if self.work.value() != "post":
+            return
+        src = self._current()
+        path = src.path if src is not None else None
+        if not path or getattr(self, "_wave_path", None) == path:
+            return
+        self._wave_path = path
+        try:
+            x = ff.decode_mono(path, sr=4000, max_sec=900)
+            n = 1200
+            m = max(1, len(x) // n)
+            pk = np.abs(x[: m * n].reshape(-1, m)).max(axis=1) if len(x) >= n else np.abs(x)
+            pk = pk / max(1e-6, float(pk.max()))
+            self.wave.set_audio(pk, len(x) / 4000.0, Path(path).name)
+            self.wave.set_sel(self.post["rp_a"].value(), self.post["rp_b"].value())
+        except Exception as e:  # noqa: BLE001
+            L.warning("파형 읽기 실패 %s: %s", path, e)
+
     def _pv(self, k: str, off="off"):
         """켜는 버튼 묶음의 값(하나만 고르기) — 아무것도 안 켰으면 off."""
         v = self.post[k].value()
         return v[0] if v else off
+
+    INST_DB = [None, -12, -9, -6, -3, 0, 3, 6]               # 악기 슬라이더 칸 → dB(None = 뺌)
 
     def _post_sum(self):
         """후보정 칸 머리 요약 = 그 칸에서 켠 것(칸을 끄면 '꺼짐')."""
@@ -696,30 +757,19 @@ class WorkWindow(DragMove, QWidget):
         if not P or "fix" not in getattr(self, "stages", {}):
             return
         po = self.post_plan(all_on=True)
-        cut = {"trim": "무음 자르기", "bar": "마디에서 끝", "loop": "루프"}
-        e = [cut[k] for k in po.cut]
-        if po.fade_in or po.fade_out:
-            e.append(f"페이드 {po.fade_in}/{po.fade_out}초")
-        if po.fit == "set":
-            e.append(f"길이 {mmss(po.fit_s)}")
-        if po.tempo:
-            e.append(f"템포 {po.tempo:+d}%")
-        if po.key:
-            e.append(f"조 {po.key:+d}")
-        so = (["잡음 " + {"low": "약", "mid": "중"}[po.denoise]] if po.denoise != "off" else []) \
-            + [dict(low="저음 정리", high="고음 정리", click="튀는 소리", loud="크기 맞추기")[k] for k in po.clean] \
-            + ([{"room": "울림", "water": "물속", "wide": "넓게"}[po.space]] if po.space != "off" else [])
-        ins = [ko + (" 뺌" if getattr(po, k) == "mute" else " 줄임")
-               for k, ko in (("vocals", "보컬"), ("drums", "드럼"), ("bass", "베이스"), ("other", "나머지"))
-               if getattr(po, k) != "keep"] + (["악기별 파일도"] if po.stems else [])
-        fx = ([f"{po.rp_a}~{po.rp_b}초 다시"] if po.repaint else []) + (["다시 입히기"] if po.redo else []) \
-            + ([f"{po.ext_s}초 이어"] if po.extend else [])
-        if fx:
-            fx.append(f"엔진 {self.engine.value()}")
-        for k, t in (("edit", e), ("sound", so), ("inst", ins), ("fix", fx)):
+        parts = {
+            "edit": PO.Post(cut=po.cut, fade_in=po.fade_in, fade_out=po.fade_out, fit=po.fit, fit_s=po.fit_s,
+                            tempo=po.tempo, key=po.key).summary(),
+            "sound": PO.Post(denoise=po.denoise, low=po.low, high=po.high, clean=po.clean).summary(),
+            "inst": PO.Post(vocals=po.vocals, drums=po.drums, bass=po.bass, other=po.other, stems=po.stems).summary(),
+            "fix": PO.Post(repaint=po.repaint, rp_a=po.rp_a, rp_b=po.rp_b, redo=po.redo, extend=po.extend,
+                           ext_s=po.ext_s).summary()}
+        if parts["fix"]:
+            parts["fix"] += f" · 엔진 {self.engine.value()}"
+        for k, t in parts.items():
             st = self.stages[k]
-            st.set_summary("꺼짐" if not st.on else (" · ".join(t) if t else "안 함"))
-        self.eng_row2.setEnabled(self.stages["fix"].on and bool(fx))      # 엔진 줄 = 고치기를 켰을 때만 진하게
+            st.set_summary("꺼짐" if not st.on else (t or "안 함"))
+        self.eng_row2.setEnabled(self.stages["fix"].on and po.fix_on())   # 엔진 줄 = 고치기를 켰을 때만 진하게
 
     def _output_body(self) -> QWidget:
         self.fmt = Seg(ff.FORMAT_NAMES, "mp3")
@@ -755,23 +805,25 @@ class WorkWindow(DragMove, QWidget):
         c = settings.get("post", {}) or {}
         P = self.post
         try:
-            for k in ("fade_in", "fade_out", "fit_s", "tempo", "key", "rp_a", "rp_b", "ext_s"):
-                if k in c:
+            for k in ("fade_in", "fade_out", "tempo", "key", "rp_a", "rp_b", "ext_s"):
+                if isinstance(c.get(k), (int, float)):
                     P[k].setValue(int(c[k]))
-            for k in ("denoise", "space"):
-                if c.get(k, "off") != "off":
-                    P[k].set_value([c[k]])
-            for k in ("vocals", "drums", "bass", "other"):
-                if c.get(k, "keep") != "keep":
-                    P[k].set_value([c[k]])
             if c.get("fit") == "set":
-                P["fit"].set_value(["set"])
+                P["fit_s"].setValue(int(c.get("fit_s", 90)))
+            if isinstance(c.get("denoise"), (int, float)):
+                P["denoise"].setValue(int(c["denoise"]) // 2)
+            for k in ("low", "high"):
+                if isinstance(c.get(k), (int, float)):
+                    P[k].setValue(int(round(c[k] * 2)))
+            for k in ("vocals", "drums", "bass", "other"):
+                v = c.get(k)
+                if isinstance(v, (int, float)):
+                    P[k].setValue(0 if v <= PO.MUTE else min(range(1, 8), key=lambda i: abs(self.INST_DB[i] - v)))
             for k in ("stems", "repaint", "redo", "extend"):
-                if c.get(k):
+                if c.get(k) is True:
                     P[k].set_value(["on"])
-            for k in ("cut", "clean"):
-                if k in c:
-                    P[k].set_value(list(c[k]))
+            P["cut"].set_value([x for x in c.get("cut", []) if x in ("trim", "bar", "loop")])
+            P["clean"].set_value([x for x in c.get("clean", []) if x in ("click", "loud")])
             for k, v in (settings.get("post_on", {}) or {}).items():
                 if k in self.stages:
                     self.stages[k].set_on(bool(v))
@@ -965,6 +1017,7 @@ class WorkWindow(DragMove, QWidget):
 
     def _sel_changed(self):
         self._show_analysis(self._current())
+        self._wave_load()
 
     def _show_analysis(self, s):
         if s is None:
@@ -1135,13 +1188,17 @@ class WorkWindow(DragMove, QWidget):
         po = PO.Post()
         if on["edit"]:
             po.cut, po.fade_in, po.fade_out = list(P["cut"].value()), P["fade_in"].value(), P["fade_out"].value()
-            po.fit, po.fit_s = ("set" if P["fit"].value() else "keep"), P["fit_s"].value()
+            fs = P["fit_s"].value()
+            po.fit, po.fit_s = ("set" if fs > P["fit_s"].minimum() else "keep"), fs
             po.tempo, po.key = P["tempo"].value(), P["key"].value()
         if on["sound"]:
-            po.denoise, po.clean, po.space = self._pv("denoise"), list(P["clean"].value()), self._pv("space")
+            po.denoise = P["denoise"].value() * 2
+            po.low, po.high = P["low"].value() / 2.0, P["high"].value() / 2.0
+            po.clean = list(P["clean"].value())
         if on["inst"]:
             for k in ("vocals", "drums", "bass", "other"):
-                setattr(po, k, self._pv(k, "keep"))
+                db = self.INST_DB[P[k].value()]
+                setattr(po, k, PO.MUTE if db is None else float(db))
             po.stems = bool(P["stems"].value())
         if on["fix"]:
             po.repaint, po.rp_a, po.rp_b = bool(P["repaint"].value()), P["rp_a"].value(), P["rp_b"].value()
