@@ -338,7 +338,7 @@ class WorkWindow(DragMove, QWidget):
         self.sum.setStyleSheet(f"color:{SUB};")
         self.wave = WaveView()                                     # 후보정: 고른 파일 파형 · 끌어서 '부분 다시' 구간
         self.wave.region.connect(self._wave_region)
-        self.wave.setVisible(False)
+        self.wave.setVisible(True)
         self.stages = {
             "analyze": StageRow("analyze", self._analyze_body()),
             "generate": StageRow("generate", self._generate_body(), fixed=True),
@@ -594,16 +594,15 @@ class WorkWindow(DragMove, QWidget):
             self.stages[k].setVisible(post)
         for wdg in (self.row_title, self.row_cand):
             wdg.setVisible(not post)
-        self.wave.setVisible(post)                                # [시안] 후보정 = 창 폭 전체 파형 띠
-        self.wave.b_play.setVisible(post)
-        self.wave.b_loop.setVisible(post)
-        self.list.setFixedHeight(56 if post else LIST_H)          # 후보정은 파일 1~2개 → 목록 낮게
+        self.wave.setVisible(True)                                # [시안] 파형 · 듣기 = 두 작업 모두(원곡 · 참고 곡도 듣고 봄)
+        self.list.setFixedHeight(56 if post else 112)             # [시안] 후보정은 파일 1~2개 → 목록 낮게
+        self.wave.setFixedHeight(84 if post else 60)              # 새로 만들기 = 파형 낮게(듣기 · 보기용)
+        self.a_info.setVisible(False)                             # 분석 칸 글(파일 · 템포 · 조) = 원곡 목록 · 파형 띠와 겹쳐 뺌
         for wdg in (self.mode_lab, self.eng_lab):
             wdg.setVisible(not post)
         self.warn_lab.setVisible(bool(hw.profile().warn) and not post)
-        if post:
-            self._wave_path = None
-            self._wave_load()
+        self._wave_path = None
+        self._wave_load()
         if hasattr(self, "test_w"):
             self.test_w.setVisible(not post and self.mode == "setup")
         self._sync()
@@ -743,8 +742,6 @@ class WorkWindow(DragMove, QWidget):
 
     def _wave_load(self):
         """원곡 목록에서 고른(없으면 첫) 파일의 파형."""
-        if self.work.value() != "post":
-            return
         src = self._current()
         path = src.path if src is not None else None
         if not path or getattr(self, "_wave_path", None) == path:
