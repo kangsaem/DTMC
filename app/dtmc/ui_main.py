@@ -337,9 +337,11 @@ class WorkWindow(DragMove, QWidget):
             "analyze": StageRow("analyze", self._analyze_body()),
             "generate": StageRow("generate", self._generate_body(), fixed=True),
             "output": StageRow("output", self._output_body(), fixed=True),
-            **{k: StageRow(k, b, fixed=True) for k, b in self._post_sections().items()},
+            **{k: StageRow(k, b) for k, b in self._post_sections().items()},
         }
         self.stages["analyze"].toggled.connect(lambda _k, _v: self._sync())
+        for k in ("edit", "sound", "inst", "fix"):                 # 후보정 칸 체크 = 칸 전체 켬/끔(설정은 기억)
+            self.stages[k].toggled.connect(lambda _k, _v: self._post_sum())
         info = QVBoxLayout()
         info.setSpacing(4)
         info.setContentsMargins(0, 0, 0, 0)
@@ -605,11 +607,15 @@ class WorkWindow(DragMove, QWidget):
         return w
 
     def _post_sections(self) -> dict:
-        """후보정(시안 I): 편집 · 음향 · 악기 · 고치기 네 칸을 한 화면에 — 켠 것은 각 칸 머리 요약에."""
-        def seg(opts, cur):
-            sg = Seg(opts, cur)
-            sg.changed.connect(lambda _k: self._post_sum())
-            return sg
+        """후보정(시안 J): 편집 · 음향 · 악기 · 고치기 — '끔/그대로' 버튼 없이 켜는 버튼만(다시 누르면 끔).
+        칸 머리 체크 = 칸 전체 켬/끔(설정은 기억)."""
+        def tog(opts, one=True):
+            """켜는 버튼들. one = 그중 하나만(다시 누르면 끔) · 아니면 여러 개."""
+            m = Multi(opts, [], limit=1 if one else len(opts), cols=len(opts), min_one=False)
+            if one:
+                m.set_swap(True)
+            m.changed.connect(lambda _v: self._post_sum())
+            return m
 
         def spin(lo, hi, val, suf, step=1):
             sp = QSpinBox()
@@ -620,98 +626,100 @@ class WorkWindow(DragMove, QWidget):
             sp.valueChanged.connect(lambda _v: self._post_sum())
             return sp
 
-        def multi(opts):
-            m = Multi(opts, [], limit=len(opts), cols=4, min_one=False)
-            m.changed.connect(lambda _v: self._post_sum())
-            return m
-
         def lab(t):
             q = QLabel(t)
             q.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             return q
-        OFFON = [("off", "끔"), ("on", "켬")]
         P = self.post = {}
-        P["cut"] = multi([("trim", "무음 자르기"), ("bar", "마디에서 끝"), ("loop", "루프")])
+        P["cut"] = tog([("trim", "무음 자르기"), ("bar", "마디에서 끝"), ("loop", "루프")], one=False)
         P["fade_in"] = spin(0, 10, 0, "초")
         P["fade_out"] = spin(0, 20, 0, "초")
-        P["fit"] = seg([("keep", "그대로"), ("set", "직접")], "keep")
+        P["fit"] = tog([("set", "길이 맞추기")])
         P["fit_s"] = spin(10, 600, 90, "초", 5)
         P["tempo"] = spin(-10, 10, 0, "%")
         P["key"] = spin(-2, 2, 0, "음")
         edit = self._rows([
-            labeled("정리", P["cut"]),
+            labeled("정리", grid4([(P["cut"], 3), (None, 1)])),
             labeled("페이드", grid4([(lab("들어감"), 1), (P["fade_in"], 1), (lab("나감"), 1), (P["fade_out"], 1)])),
-            labeled("길이", grid4([(P["fit"], 2), (P["fit_s"], 1), (None, 1)])),
+            labeled("길이", grid4([(P["fit"], 1), (P["fit_s"], 1), (None, 2)])),
             labeled("빠르기·조", grid4([(lab("템포"), 1), (P["tempo"], 1), (lab("조"), 1), (P["key"], 1)]))])
-        P["denoise"] = seg([("off", "끔"), ("low", "약"), ("mid", "중")], "off")
-        P["clean"] = multi([("low", "저음 정리"), ("high", "고음 정리"), ("click", "튀는 소리"), ("loud", "크기 맞추기")])
+        P["denoise"] = tog([("low", "약"), ("mid", "중")])
+        P["clean"] = tog([("low", "저음 정리"), ("high", "고음 정리"), ("click", "튀는 소리"), ("loud", "크기 맞추기")],
+                         one=False)
         P["clean"].setToolTip("크기 맞추기 = 유튜브 기준(-14 LUFS) + 큰 소리·작은 소리 차이 줄이기(압축) + 깨짐 막기")
-        P["space"] = seg([("off", "끔"), ("room", "울림"), ("water", "물속"), ("wide", "넓게")], "off")
+        P["space"] = tog([("room", "울림"), ("water", "물속"), ("wide", "넓게")])
         sound = self._rows([
-            labeled("잡음 줄이기", grid4([(P["denoise"], 3), (None, 1)])),
-            labeled("정리", P["clean"]),
-            labeled("공간감", grid4([(P["space"], 4)]))])
-        LV = [("keep", "그대로"), ("down", "줄임"), ("mute", "뺌")]
-        for k in ("vocals", "drums", "bass", "other"):
-            P[k] = seg(LV, "keep")
-        P["stems"] = seg(OFFON, "off")
-        P["stems"].setToolTip("악기별 4개 파일(보컬 · 드럼 · 베이스 · 나머지)로도 저장")
+            labeled("잡음 줄이기", grid4([(P["denoise"], 2), (None, 2)])),
+            labeled("정리", grid4([(P["clean"], 4)])),
+            labeled("공간감", grid4([(P["space"], 3), (None, 1)]))])
+        for k_ in ("vocals", "drums", "bass", "other"):
+            P[k_] = tog([("down", "줄임"), ("mute", "뺌")])
+        P["stems"] = tog([("on", "악기별 파일도")])
+        P["stems"].setToolTip("보컬 · 드럼 · 베이스 · 나머지 4개 파일로도 저장")
         inst = self._rows([
-            labeled("보컬", grid4([(P["vocals"], 3), (None, 1)])),
-            labeled("드럼", grid4([(P["drums"], 3), (None, 1)])),
-            labeled("베이스", grid4([(P["bass"], 3), (None, 1)])),
-            labeled("나머지", grid4([(P["other"], 3), (None, 1)])),
-            labeled("나눠 저장", grid4([(P["stems"], 2), (None, 2)]))])
-        P["repaint"] = seg(OFFON, "off")
-        P["rp_a"] = spin(0, 600, 30, "초")
-        P["rp_b"] = spin(0, 600, 40, "초")
-        P["redo"] = seg(OFFON, "off")
-        P["extend"] = seg(OFFON, "off")
+            labeled("보컬", grid4([(P["vocals"], 2), (None, 2)])),
+            labeled("드럼", grid4([(P["drums"], 2), (None, 2)])),
+            labeled("베이스", grid4([(P["bass"], 2), (None, 2)])),
+            labeled("나머지", grid4([(P["other"], 2), (None, 2)])),
+            labeled("저장", grid4([(P["stems"], 2), (None, 2)]))])
+        P["repaint"] = tog([("on", "부분 다시")])
+        P["rp_a"] = spin(0, 600, 30, "초부터")
+        P["rp_b"] = spin(0, 600, 40, "초까지")
+        P["redo"] = tog([("on", "다시 입히기")])
+        P["extend"] = tog([("on", "이어 만들기")])
         P["ext_s"] = spin(5, 120, 20, "초", 5)
-        self.engine2 = Seg(ENGINES, self.engine.value())       # 새로 만들기의 엔진과 같은 값(서로 맞춤)
-        for k in ("4B", "XL"):
-            self.engine2.btns[k].setEnabled(self.engine.btns[k].isEnabled())
-        self.engine2.changed.connect(lambda k: (self.engine.set_value(k), self._sync()))
-        self.engine.changed.connect(lambda k: self.engine2.set_value(k))
+        self.engine2 = Seg(ENGINES, self.engine.value())       # 새로 만들기의 엔진과 같은 값(_sync 에서 맞춤)
+        for k_ in ("4B", "XL"):
+            self.engine2.btns[k_].setEnabled(self.engine.btns[k_].isEnabled())
+        self.engine2.changed.connect(lambda k_: (self.engine.set_value(k_), self._sync()))
         b_ref2 = small_button("음색 참고", tip="다시 입히기에 함께 쓸 실제 연주 녹음(최대 3개)")
         b_ref2.clicked.connect(self.pick_ref)
-        P["repaint"].setToolTip("그 구간만 새로 만들고 앞뒤와 자연스럽게 이음(나머지는 원래 소리)")
+        P["repaint"].setToolTip("그 구간(부터~까지)만 새로 만들고 앞뒤와 자연스럽게 이음(나머지는 원래 소리)")
         P["redo"].setToolTip("구성은 두고 음색만 새로(곡 전체)")
+        P["extend"].setToolTip("곡 끝에 이어서 더 만듦")
+        self.eng_row2 = grid4([(self.engine2, 3), (None, 1)])
         fix = self._rows([
-            labeled("부분 다시", grid4([(P["repaint"], 2), (P["rp_a"], 1), (P["rp_b"], 1)])),
-            labeled("다시 입히기", grid4([(P["redo"], 2), (b_ref2, 1), (None, 1)])),
-            labeled("이어 만들기", grid4([(P["extend"], 2), (P["ext_s"], 1), (None, 1)])),
-            labeled("엔진", grid4([(self.engine2, 3), (None, 1)]))])
+            labeled("", grid4([(P["repaint"], 1), (P["rp_a"], 1), (P["rp_b"], 1), (None, 1)])),
+            labeled("", grid4([(P["redo"], 1), (b_ref2, 1), (None, 2)])),
+            labeled("", grid4([(P["extend"], 1), (P["ext_s"], 1), (None, 2)])),
+            labeled("엔진", self.eng_row2)])
         return {"edit": edit, "sound": sound, "inst": inst, "fix": fix}
 
+    def _pv(self, k: str, off="off"):
+        """켜는 버튼 묶음의 값(하나만 고르기) — 아무것도 안 켰으면 off."""
+        v = self.post[k].value()
+        return v[0] if v else off
+
     def _post_sum(self):
-        """후보정 네 칸 머리 요약 = 그 칸에서 켠 것."""
+        """후보정 칸 머리 요약 = 그 칸에서 켠 것(칸을 끄면 '꺼짐')."""
         P = getattr(self, "post", {})
         if not P or "fix" not in getattr(self, "stages", {}):
             return
+        po = self.post_plan(all_on=True)
         cut = {"trim": "무음 자르기", "bar": "마디에서 끝", "loop": "루프"}
-        e = [cut[k] for k in P["cut"].value()]
-        if P["fade_in"].value() or P["fade_out"].value():
-            e.append(f"페이드 {P['fade_in'].value()}/{P['fade_out'].value()}초")
-        if P["fit"].value() == "set":
-            e.append(f"길이 {mmss(P['fit_s'].value())}")
-        if P["tempo"].value():
-            e.append(f"템포 {P['tempo'].value():+d}%")
-        if P["key"].value():
-            e.append(f"조 {P['key'].value():+d}")
-        so = (["잡음 " + {"low": "약", "mid": "중"}[P["denoise"].value()]] if P["denoise"].value() != "off" else []) \
-            + [dict(low="저음 정리", high="고음 정리", click="튀는 소리", loud="크기 맞추기")[k] for k in P["clean"].value()] \
-            + ([{"room": "울림", "water": "물속", "wide": "넓게"}[P["space"].value()]] if P["space"].value() != "off" else [])
-        ins = [ko + (" 뺌" if P[k].value() == "mute" else " 줄임")
+        e = [cut[k] for k in po.cut]
+        if po.fade_in or po.fade_out:
+            e.append(f"페이드 {po.fade_in}/{po.fade_out}초")
+        if po.fit == "set":
+            e.append(f"길이 {mmss(po.fit_s)}")
+        if po.tempo:
+            e.append(f"템포 {po.tempo:+d}%")
+        if po.key:
+            e.append(f"조 {po.key:+d}")
+        so = (["잡음 " + {"low": "약", "mid": "중"}[po.denoise]] if po.denoise != "off" else []) \
+            + [dict(low="저음 정리", high="고음 정리", click="튀는 소리", loud="크기 맞추기")[k] for k in po.clean] \
+            + ([{"room": "울림", "water": "물속", "wide": "넓게"}[po.space]] if po.space != "off" else [])
+        ins = [ko + (" 뺌" if getattr(po, k) == "mute" else " 줄임")
                for k, ko in (("vocals", "보컬"), ("drums", "드럼"), ("bass", "베이스"), ("other", "나머지"))
-               if P[k].value() != "keep"] + (["악기별 저장"] if P["stems"].value() == "on" else [])
-        fx = ([f"{P['rp_a'].value()}~{P['rp_b'].value()}초 다시"] if P["repaint"].value() == "on" else []) \
-            + (["다시 입히기"] if P["redo"].value() == "on" else []) \
-            + ([f"{P['ext_s'].value()}초 이어"] if P["extend"].value() == "on" else [])
+               if getattr(po, k) != "keep"] + (["악기별 파일도"] if po.stems else [])
+        fx = ([f"{po.rp_a}~{po.rp_b}초 다시"] if po.repaint else []) + (["다시 입히기"] if po.redo else []) \
+            + ([f"{po.ext_s}초 이어"] if po.extend else [])
         if fx:
             fx.append(f"엔진 {self.engine.value()}")
         for k, t in (("edit", e), ("sound", so), ("inst", ins), ("fix", fx)):
-            self.stages[k].set_summary(" · ".join(t) if t else "안 함")
+            st = self.stages[k]
+            st.set_summary("꺼짐" if not st.on else (" · ".join(t) if t else "안 함"))
+        self.eng_row2.setEnabled(self.stages["fix"].on and bool(fx))      # 엔진 줄 = 고치기를 켰을 때만 진하게
 
     def _output_body(self) -> QWidget:
         self.fmt = Seg(ff.FORMAT_NAMES, "mp3")
@@ -743,27 +751,36 @@ class WorkWindow(DragMove, QWidget):
 
     # ================================================================ 설정 기억
     def _load_post(self):
-        """후보정 설정 · 작업(새로 만들기 | 후보정) 되살리기."""
+        """후보정 설정 · 칸 체크 · 작업(새로 만들기 | 후보정) 되살리기."""
         c = settings.get("post", {}) or {}
         P = self.post
         try:
             for k in ("fade_in", "fade_out", "fit_s", "tempo", "key", "rp_a", "rp_b", "ext_s"):
                 if k in c:
                     P[k].setValue(int(c[k]))
-            for k in ("fit", "denoise", "space", "vocals", "drums", "bass", "other"):
-                if k in c:
-                    P[k].set_value(c[k])
+            for k in ("denoise", "space"):
+                if c.get(k, "off") != "off":
+                    P[k].set_value([c[k]])
+            for k in ("vocals", "drums", "bass", "other"):
+                if c.get(k, "keep") != "keep":
+                    P[k].set_value([c[k]])
+            if c.get("fit") == "set":
+                P["fit"].set_value(["set"])
             for k in ("stems", "repaint", "redo", "extend"):
-                if k in c:
-                    P[k].set_value("on" if c[k] else "off")
+                if c.get(k):
+                    P[k].set_value(["on"])
             for k in ("cut", "clean"):
                 if k in c:
                     P[k].set_value(list(c[k]))
+            for k, v in (settings.get("post_on", {}) or {}).items():
+                if k in self.stages:
+                    self.stages[k].set_on(bool(v))
         except Exception as e:  # noqa: BLE001
             L.warning("후보정 설정 되살리기 실패: %s", e)
         if settings.get("job_mode") == "post":
             self.work.set_value("post")
             self._work_changed()
+        self._post_sum()
 
     def _load_cfg(self):
         c = self.cfg
@@ -788,7 +805,8 @@ class WorkWindow(DragMove, QWidget):
     def _save_cfg(self):
         p = self.plan()
         import dataclasses as _dc
-        settings.put("post", _dc.asdict(self.post_plan()))
+        settings.put("post", _dc.asdict(self.post_plan(all_on=True)))
+        settings.put("post_on", {k: self.stages[k].on for k in ("edit", "sound", "inst", "fix")})
         settings.put("job_mode", self.work.value())
         settings.put("work", {
             "analyze_on": p.analyze_on, "bpm_mode": self.bpm_mode.value(), "bpm": p.bpm, "src_feel": p.src_feel, "strength": self.strength.value() * STRENGTH_STEP,
@@ -919,9 +937,18 @@ class WorkWindow(DragMove, QWidget):
         txt = (f"원곡 {len(cs)}개 → " if use_src else "원곡 없이 → ") + f"결과 {n_out}곡 · 만들 길이 합계 {mmss(total * p.candidates)}"
         est = jobs.estimate(total * p.candidates, p.cpu_lm)
         txt += f" · 예상 약 {max(1, round(est / 60))}분" if est else " · 예상 시간은 첫 생성 후 표시"
+        post = self.work.value() == "post"
+        if post:                                               # 후보정: 파일 수만큼 결과 · 켠 칸
+            po = self.post_plan()
+            on = [n for n, f in (("악기", po.inst_on), ("고치기", po.fix_on), ("편집", po.edit_on), ("음향", po.sound_on)) if f()]
+            txt = (f"파일 {len(cs)}개 → 결과 {len(cs)}개" if cs else "후보정할 파일을 원곡 칸에 넣으세요") \
+                + (f" · {' → '.join(on)}" if on else " · 켠 후보정 없음")
+        self.engine2.set_value(self.engine.value())            # 고치기 칸 엔진 = 새로 만들기 엔진(되살린 값 포함)
         self.sum.setText(txt)
         if self.mode == "setup":
-            if EG.installed():
+            if post and not (self.post_plan().fix_on() or self.post_plan().inst_on()):
+                self.state_lab.setText("")
+            elif EG.installed():
                 self.state_lab.setText("")
             else:
                 self.state_lab.setText("생성 엔진 설치 필요 — [AUTO]를 누르면 먼저 설치합니다(처음 한 번).")
@@ -1101,16 +1128,26 @@ class WorkWindow(DragMove, QWidget):
                              [("cancel", "취소", 72, None), ("ok", "내려받고 시작", 110, "blue")])
         return r == "ok"
 
-    def post_plan(self) -> "PO.Post":
-        """후보정 화면 설정 → Post."""
+    def post_plan(self, all_on: bool = False) -> "PO.Post":
+        """후보정 화면 설정 → Post. 칸 머리 체크를 끈 칸은 비움(all_on = 체크 무시, 요약용)."""
         P = self.post
-        return PO.Post(cut=list(P["cut"].value()), fade_in=P["fade_in"].value(), fade_out=P["fade_out"].value(),
-                       fit=P["fit"].value(), fit_s=P["fit_s"].value(), tempo=P["tempo"].value(), key=P["key"].value(),
-                       denoise=P["denoise"].value(), clean=list(P["clean"].value()), space=P["space"].value(),
-                       vocals=P["vocals"].value(), drums=P["drums"].value(), bass=P["bass"].value(),
-                       other=P["other"].value(), stems=P["stems"].value() == "on",
-                       repaint=P["repaint"].value() == "on", rp_a=P["rp_a"].value(), rp_b=P["rp_b"].value(),
-                       redo=P["redo"].value() == "on", extend=P["extend"].value() == "on", ext_s=P["ext_s"].value())
+        on = {k: all_on or self.stages[k].on for k in ("edit", "sound", "inst", "fix")}
+        po = PO.Post()
+        if on["edit"]:
+            po.cut, po.fade_in, po.fade_out = list(P["cut"].value()), P["fade_in"].value(), P["fade_out"].value()
+            po.fit, po.fit_s = ("set" if P["fit"].value() else "keep"), P["fit_s"].value()
+            po.tempo, po.key = P["tempo"].value(), P["key"].value()
+        if on["sound"]:
+            po.denoise, po.clean, po.space = self._pv("denoise"), list(P["clean"].value()), self._pv("space")
+        if on["inst"]:
+            for k in ("vocals", "drums", "bass", "other"):
+                setattr(po, k, self._pv(k, "keep"))
+            po.stems = bool(P["stems"].value())
+        if on["fix"]:
+            po.repaint, po.rp_a, po.rp_b = bool(P["repaint"].value()), P["rp_a"].value(), P["rp_b"].value()
+            po.redo = bool(P["redo"].value())
+            po.extend, po.ext_s = bool(P["extend"].value()), P["ext_s"].value()
+        return po
 
     def _run(self, test: bool, compare: bool = False, fit_len: bool = False, vocal: bool = False, redo: str = ""):
         post = self.post_plan() if (self.work.value() == "post" and not (test or compare or fit_len or vocal or redo)) \
