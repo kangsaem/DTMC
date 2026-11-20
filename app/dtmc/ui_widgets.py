@@ -557,19 +557,33 @@ class MagnetSlider(QWidget):
 
 
 class WaveView(QWidget):
-    """파형(고른 파일) + 끌어서 구간 고르기(region 신호: 시작 초, 끝 초). 고른 구간 = 주황 음영."""
+    """[시안] 창 폭 전체 파형 · 위 띠(고른 구간 글자) · 아래 띠(시간 · 마디 번호) · 마디 줄 · 끌면 마디에 붙음."""
     region = Signal(float, float)
+    TOP, BOT = 16, 14
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.peaks, self.dur, self.sel, self._a = None, 0.0, None, None
-        self.title = ""
+        self.title, self.bpm, self.beat0, self.show_sel = "", 0.0, 0.0, True
         self.setMinimumHeight(60)
         self.setCursor(Qt.IBeamCursor)
 
-    def set_audio(self, peaks, dur: float, title: str = ""):
-        self.peaks, self.dur, self.title = peaks, float(dur), title
+    def set_audio(self, peaks, dur: float, title: str = "", bpm: float = 0.0, beat0: float = 0.0):
+        self.peaks, self.dur, self.title, self.bpm, self.beat0 = peaks, float(dur), title, float(bpm), float(beat0)
         self.update()
+
+    def bar_s(self) -> float:
+        return 240.0 / self.bpm if self.bpm > 0 else 0.0
+
+    def snap(self, t: float) -> float:
+        b = self.bar_s()
+        if b <= 0:
+            return round(t, 2)
+        return round(max(0.0, min(self.dur, self.beat0 + round((t - self.beat0) / b) * b)), 2)
+
+    def bar_no(self, t: float) -> int:
+        b = self.bar_s()
+        return int(round((t - self.beat0) / b)) + 1 if b > 0 else 0
 
     def set_sel(self, a: float, b: float):
         self.sel = (a, b) if b > a else None
@@ -585,46 +599,63 @@ class WaveView(QWidget):
     def mouseMoveEvent(self, e):
         if self._a is not None:
             b = self._t(e.position().x())
-            self.set_sel(min(self._a, b), max(self._a, b))
+            self.set_sel(self.snap(min(self._a, b)), self.snap(max(self._a, b)))
 
     def mouseReleaseEvent(self, e):
         if self._a is not None and self.sel:
-            self.region.emit(round(self.sel[0]), round(self.sel[1]))
+            self.region.emit(self.sel[0], self.sel[1])
         self._a = None
 
     def paintEvent(self, e):
         p = QPainter(self)
-        r = self.rect().adjusted(0, 0, -1, -1)
-        p.fillRect(r, QColor("#1e1e1e"))
+        W, H = self.width(), self.height()
+        T, B = self.TOP, self.BOT
+        wr = QRectF(0, T, W - 1, H - T - B - 1)                   # 파형 칸
+        p.fillRect(wr, QColor("#1e1e1e"))
         p.setPen(QColor("#3a3a3a"))
-        p.drawRect(r)
+        p.drawRect(wr)
+        f = p.font()
+        f.setPointSizeF(max(6.5, f.pointSizeF() - 1.5))
+        p.setFont(f)
         if self.peaks is None or self.dur <= 0:
             p.setPen(QColor(SUB_TXT))
-            p.drawText(r, Qt.AlignCenter, "파일을 고르면 파형이 보입니다 · 끌어서 '부분 다시' 구간 고르기")
+            p.drawText(wr, Qt.AlignCenter, "파일을 고르면 파형이 보입니다")
             return
-        w, h = self.width() - 8, self.height()
-        if self.sel:
-            xa = 4 + w * self.sel[0] / self.dur
-            xb = 4 + w * self.sel[1] / self.dur
-            p.fillRect(QRectF(xa, 1, xb - xa, h - 2), QColor(200, 102, 30, 90))
+        w = W - 8
+        X = lambda t: 4 + w * t / self.dur                                    # noqa: E731
+        sel = self.sel if self.show_sel else None
+        if sel:
+            p.fillRect(QRectF(X(sel[0]), T + 1, X(sel[1]) - X(sel[0]), wr.height() - 1), QColor(200, 102, 30, 90))
+        bs = self.bar_s()
+        if bs > 0:                                                             # 마디 줄(4마디마다 진하게)
+            k, t = 0, self.beat0
+            while t < self.dur:
+                p.setPen(QColor("#4a4a4a") if k % 4 == 0 else QColor("#2e2e2e"))
+                p.drawLine(QPointF(X(t), T + 1), QPointF(X(t), H - B - 1))
+                k, t = k + 1, t + bs
         p.setPen(QColor("#5fb0e8"))
         n = len(self.peaks)
-        mid = h / 2
+        mid, amp = T + wr.height() / 2, wr.height() / 2 - 3
         for i in range(w):
             v = float(self.peaks[min(n - 1, int(i * n / max(1, w)))])
-            p.drawLine(QPointF(4 + i, mid - v * (mid - 6)), QPointF(4 + i, mid + v * (mid - 6)))
-        p.setPen(QColor(SUB_TXT))
-        f = p.font()
-        f.setPointSizeF(max(6.5, f.pointSizeF() - 2))
-        p.setFont(f)
-        step = 10 if self.dur <= 90 else 30 if self.dur <= 300 else 60
-        t = step
-        while t < self.dur:
-            x = 4 + w * t / self.dur
-            p.drawLine(QPointF(x, h - 5), QPointF(x, h - 1))
-            p.drawText(QRectF(x - 20, h - 17, 40, 12), Qt.AlignHCenter, f"{int(t // 60)}:{int(t % 60):02d}")
-            t += step
-        if self.sel:
+            p.drawLine(QPointF(4 + i, mid - v * amp), QPointF(4 + i, mid + v * amp))
+        if sel:
             p.setPen(QColor("#f08a3c"))
-            p.drawText(QRectF(6, 2, w, 14), Qt.AlignLeft,
-                       f"고른 구간 {int(self.sel[0])}~{int(self.sel[1])}초 → 부분 다시")
+            for t in sel:
+                p.drawLine(QPointF(X(t), T + 1), QPointF(X(t), H - B - 1))
+        # 아래 띠: 마디 번호(4마디마다) · 시간(분:초)
+        p.setPen(QColor(SUB_TXT))
+        if bs > 0:
+            k, t = 0, self.beat0
+            while t < self.dur:
+                if k % 4 == 0:
+                    p.drawText(QRectF(X(t) + 2, H - B, 60, B), Qt.AlignLeft | Qt.AlignVCenter, f"{k + 1}마디 {int(t // 60)}:{int(t % 60):02d}")
+                k, t = k + 1, t + bs
+        # 위 띠: 파일 이름 · 빠르기 / 고른 구간
+        p.drawText(QRectF(4, 0, W / 2, T), Qt.AlignLeft | Qt.AlignVCenter,
+                   f"{self.title}  ·  {int(self.dur // 60)}:{int(self.dur % 60):02d}" + (f"  ·  {self.bpm:.0f} BPM · 한 마디 {bs:.2f}초" if bs else ""))
+        if sel:
+            p.setPen(QColor("#f08a3c"))
+            fm = lambda t: f"{int(t // 60)}:{t % 60:05.2f}"                     # noqa: E731
+            txt = f"부분 다시  {self.bar_no(sel[0])}~{self.bar_no(sel[1]) - 1}마디  ({fm(sel[0])} ~ {fm(sel[1])} · {self.bar_no(sel[1]) - self.bar_no(sel[0])}마디)"
+            p.drawText(QRectF(W / 2, 0, W / 2 - 4, T), Qt.AlignRight | Qt.AlignVCenter, txt)

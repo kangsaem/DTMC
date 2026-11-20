@@ -11,7 +11,7 @@ import numpy as np
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
-from PySide6.QtWidgets import (QSlider, QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPlainTextEdit,
+from PySide6.QtWidgets import (QSlider, QDoubleSpinBox, QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPlainTextEdit,
                                QListWidgetItem, QMenu, QScrollArea, QSizePolicy, QSpinBox, QStyle,
                                QStackedWidget, QStyledItemDelegate, QVBoxLayout, QWidget)
 
@@ -352,7 +352,6 @@ class WorkWindow(DragMove, QWidget):
         info.setSpacing(4)
         info.setContentsMargins(0, 0, 0, 0)
         info.addWidget(grid4([(self.work, 2), (None, 2)]))  # 맨 위 = 작업 고르기(새로 만들기 | 후보정, 시안 I · 주황)
-        info.addWidget(self.wave, 1)
         info.addWidget(self.mode_lab)
         info.addWidget(self.eng_lab)
         info.addWidget(self.warn_lab)
@@ -407,8 +406,10 @@ class WorkWindow(DragMove, QWidget):
         self.run_w.setFixedWidth(COL_W * 2 + 10)
         self.run_w.setVisible(False)
         mid = QVBoxLayout()
-        mid.setSpacing(12)
+        mid.setSpacing(8)
         mid.addLayout(band)
+        self.wave.setFixedHeight(84)                              # [시안] 파형 = 창 폭 전체 띠
+        mid.addWidget(self.wave)
         mid.addWidget(self.rw, 1)
         mid.addWidget(self.run_w, 1)
         # ---- 아래
@@ -591,7 +592,8 @@ class WorkWindow(DragMove, QWidget):
             self.stages[k].setVisible(post)
         for wdg in (self.row_title, self.row_cand):
             wdg.setVisible(not post)
-        self.wave.setVisible(post)                                # 후보정 = 위 정보 칸에 파형(하드웨어 · 엔진 줄 대신)
+        self.wave.setVisible(post)                                # [시안] 후보정 = 창 폭 전체 파형 띠
+        self.list.setFixedHeight(64 if post else LIST_H)          # 후보정은 파일 1~2개 → 목록 낮게
         for wdg in (self.mode_lab, self.eng_lab):
             wdg.setVisible(not post)
         self.warn_lab.setVisible(bool(hw.profile().warn) and not post)
@@ -692,8 +694,19 @@ class WorkWindow(DragMove, QWidget):
             labeled("나머지", P["other"]),
             labeled("저장", grid4([(P["stems"], 2), (None, 2)]))])
         P["repaint"] = tog([("on", "부분 다시")])
-        P["rp_a"] = spin(0, 600, 30, "초부터")
-        P["rp_b"] = spin(0, 600, 40, "초까지")
+        def dspin(val, suf):
+            sp = QDoubleSpinBox()
+            sp.setDecimals(2)
+            sp.setRange(0, 600)
+            sp.setSingleStep(0.01)
+            sp.setValue(val)
+            sp.setSuffix(suf)
+            sp.editingFinished.connect(lambda: sp.setValue(self.wave.snap(sp.value())))   # 넣은 초 → 가까운 마디
+            sp.valueChanged.connect(lambda _v: self._post_sum())
+            return sp
+        P["rp_a"] = dspin(30, "초부터")
+        P["rp_b"] = dspin(40, "초까지")
+        P["repaint"].changed.connect(lambda _v: (setattr(self.wave, "show_sel", bool(P["repaint"].value())), self.wave.update()))
         P["redo"] = tog([("on", "다시 입히기")])
         P["extend"] = tog([("on", "이어 만들기")])
         P["ext_s"] = spin(5, 120, 20, "초", 5)
@@ -719,8 +732,8 @@ class WorkWindow(DragMove, QWidget):
     def _wave_region(self, a: float, b: float):
         """파형에서 끌어 고른 구간 → 부분 다시 칸(켜기까지)."""
         P = self.post
-        P["rp_a"].setValue(int(a))
-        P["rp_b"].setValue(int(b))
+        P["rp_a"].setValue(a)
+        P["rp_b"].setValue(b)
         P["repaint"].set_value(["on"])
         self._post_sum()
 
@@ -739,7 +752,8 @@ class WorkWindow(DragMove, QWidget):
             m = max(1, len(x) // n)
             pk = np.abs(x[: m * n].reshape(-1, m)).max(axis=1) if len(x) >= n else np.abs(x)
             pk = pk / max(1e-6, float(pk.max()))
-            self.wave.set_audio(pk, len(x) / 4000.0, Path(path).name)
+            an = getattr(src, "analysis", None)
+            self.wave.set_audio(pk, len(x) / 4000.0, Path(path).name, getattr(an, "bpm", 0.0) or 0.0)
             self.wave.set_sel(self.post["rp_a"].value(), self.post["rp_b"].value())
         except Exception as e:  # noqa: BLE001
             L.warning("파형 읽기 실패 %s: %s", path, e)
@@ -756,6 +770,8 @@ class WorkWindow(DragMove, QWidget):
         P = getattr(self, "post", {})
         if not P or "fix" not in getattr(self, "stages", {}):
             return
+        self.wave.show_sel = bool(P["repaint"].value())
+        self.wave.update()
         po = self.post_plan(all_on=True)
         parts = {
             "edit": PO.Post(cut=po.cut, fade_in=po.fade_in, fade_out=po.fade_out, fit=po.fit, fit_s=po.fit_s,
