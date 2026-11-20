@@ -351,7 +351,9 @@ class WorkWindow(DragMove, QWidget):
         info = QVBoxLayout()
         info.setSpacing(4)
         info.setContentsMargins(0, 0, 0, 0)
-        info.addWidget(grid4([(self.work, 2), (None, 2)]))  # 맨 위 = 작업 고르기(새로 만들기 | 후보정, 시안 I · 주황)
+        self.wave.b_play.setText("▶ 듣기")
+        self.wave.b_play.setStyleSheet("QPushButton{color:#ffffff;}")
+        info.addWidget(grid4([(self.work, 2), (self.wave.b_play, 1), (self.wave.b_loop, 1)]))   # [시안] 듣기 · 구간 듣기 = 후보정 오른쪽  # 맨 위 = 작업 고르기(새로 만들기 | 후보정, 시안 I · 주황)
         info.addWidget(self.mode_lab)
         info.addWidget(self.eng_lab)
         info.addWidget(self.warn_lab)
@@ -593,6 +595,8 @@ class WorkWindow(DragMove, QWidget):
         for wdg in (self.row_title, self.row_cand):
             wdg.setVisible(not post)
         self.wave.setVisible(post)                                # [시안] 후보정 = 창 폭 전체 파형 띠
+        self.wave.b_play.setVisible(post)
+        self.wave.b_loop.setVisible(post)
         self.list.setFixedHeight(56 if post else LIST_H)          # 후보정은 파일 1~2개 → 목록 낮게
         for wdg in (self.mode_lab, self.eng_lab):
             wdg.setVisible(not post)

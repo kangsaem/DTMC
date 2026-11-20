@@ -560,7 +560,7 @@ class WaveView(QWidget):
     """[시안] 창 폭 전체 파형 · 위 띠(고른 구간 글자) · 아래 띠(시간 · 마디 번호) · 마디 줄 · 끌면 마디에 붙음."""
     region = Signal(float, float)
     seek = Signal(float)
-    TOP, BOT = 26, 14
+    TOP, BOT = 16, 14
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -568,12 +568,8 @@ class WaveView(QWidget):
         self.title, self.bpm, self.beat0, self.show_sel = "", 0.0, 0.0, True
         self.pos, self.playing, self._x0 = 0.0, False, 0
         self.b_play = small_button("▶", 34, 22, "듣기 / 멈춤 — 파형을 한 번 누르면 그 지점부터")
-        self.b_play.setParent(self)
-        self.b_play.move(0, 1)
         self.b_loop = small_button("구간 듣기", 72, 22, "고른 구간만 되풀이해 듣기")
-        self.b_loop.setParent(self)
         self.b_loop.setCheckable(True)
-        self.b_loop.move(38, 1)
         self.setMinimumHeight(60)
         self.setCursor(Qt.IBeamCursor)
 
@@ -677,10 +673,10 @@ class WaveView(QWidget):
                 k, t = k + 1, t + bs
         # 위 띠: 파일 이름 · 빠르기 / 고른 구간
         p.setPen(QColor("#ffffff"))
-        p.drawText(QRectF(118, 0, 110, T), Qt.AlignLeft | Qt.AlignVCenter,
+        p.drawText(QRectF(4, 0, 110, T), Qt.AlignLeft | Qt.AlignVCenter,
                    f"{int(self.pos // 60)}:{self.pos % 60:05.2f} · {self.bar_no(self.pos)}마디")
         p.setPen(QColor(SUB_TXT))
-        p.drawText(QRectF(232, 0, W / 2, T), Qt.AlignLeft | Qt.AlignVCenter,
+        p.drawText(QRectF(118, 0, W / 2, T), Qt.AlignLeft | Qt.AlignVCenter,
                    f"{self.title}  ·  {int(self.dur // 60)}:{int(self.dur % 60):02d}" + (f"  ·  {self.bpm:.0f} BPM · 한 마디 {bs:.2f}초" if bs else ""))
         if sel:
             p.setPen(QColor("#f08a3c"))
